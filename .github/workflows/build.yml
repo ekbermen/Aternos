@@ -7,16 +7,64 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # 22.04: setup-python'un eski surumleri (3.8-3.10) bu imajda kesin var
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
+      # Chaquopy'nin lxml icin hangi Python surumunde Android wheel sundugunu
+      # canli olarak okur; hem Python surumunu hem lxml surumunu otomatik secer.
+      - name: lxml Android wheel tespit et
+        id: detect
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re, sys, urllib.request
+
+          url = "https://chaquo.com/pypi-13.1/lxml/"
+          out = os.environ["GITHUB_OUTPUT"]
+          try:
+              html = urllib.request.urlopen(url, timeout=40).read().decode("utf-8", "replace")
+          except Exception as e:
+              print("UYARI: indeks okunamadi (%s), varsayilan 3.8 / 4.6.3 kullaniliyor" % e)
+              with open(out, "a") as f:
+                  f.write("py=3.8\nlxml=4.6.3\n")
+              sys.exit(0)
+
+          pat = re.compile(
+              r"lxml-([0-9][0-9.]*)-(\d+)-cp(\d)(\d+)-cp\d+-android_\d+_(arm64_v8a|armeabi_v7a)\.whl"
+          )
+          found = {}
+          for m in pat.finditer(html):
+              ver, _bld, a, b, abi = m.groups()
+              found.setdefault((int(a), int(b), ver), set()).add(abi)
+
+          print("Bulunan lxml Android wheel'leri:")
+          for k in sorted(found):
+              print("  py%d.%d lxml %s %s" % (k[0], k[1], k[2], sorted(found[k])))
+
+          # Chaquopy 15: Python 3.8-3.12, iki ABI de olmali
+          ok = [k for k, s in found.items() if len(s) == 2 and k[0] == 3 and 8 <= k[1] <= 12]
+          if not ok:
+              print("HATA: uygun lxml Android wheel'i yok")
+              sys.exit(1)
+
+          def key(k):
+              return (k[1], tuple(int(x) for x in k[2].split(".") if x.isdigit()))
+
+          best = max(ok, key=key)
+          py = "%d.%d" % (best[0], best[1])
+          print("SECILDI: Python %s, lxml %s" % (py, best[2]))
+          with open(out, "a") as f:
+              f.write("py=%s\nlxml=%s\n" % (py, best[2]))
+          PY
+
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ steps.detect.outputs.py }}
 
       - name: Android SDK hazirla (runner'da hazir gelir)
         run: |
@@ -82,7 +130,7 @@ jobs:
           }
           chaquopy {
               defaultConfig {
-                  version = "3.11"
+                  version = "__PYVER__"
                   buildPython("python3")
                   pip { __PIP__ }
               }
@@ -115,7 +163,12 @@ jobs:
 
           cat > app/src/main/python/bridge.py <<'EOF'
           import json
-          from python_aternos import Client, Lists
+          from python_aternos import Client
+
+          try:
+              from python_aternos import Lists
+          except Exception:
+              from python_aternos.atplayers import Lists
 
           _at = None
           _dir = ""
@@ -143,6 +196,15 @@ jobs:
               if _at is None:
                   _at = Client.restore_session(_dir + "/session")
               return _at.list_servers()[_idx]
+
+
+          def _cfg(s):
+              # kutuphane surumune gore config/options/settings adlarindan biri
+              for n in ("config", "options", "settings"):
+                  o = getattr(s, n, None)
+                  if o is not None:
+                      return o() if callable(o) else o
+              raise RuntimeError("config API bulunamadi")
 
 
           def init(d):
@@ -199,8 +261,10 @@ jobs:
 
           def act(what):
               try:
+                  if what not in ("start", "stop", "restart", "confirm"):
+                      return _err("gecersiz islem")
                   s = _s()
-                  getattr(s, what)()  # start / stop / restart / confirm
+                  getattr(s, what)()
                   return _ok()
               except Exception as e:
                   return _err(e)
@@ -220,7 +284,7 @@ jobs:
 
           def prop(key, value):
               try:
-                  _s().options.set_server_prop(key, value)
+                  _cfg(_s()).set_server_prop(key, value)
                   return _ok()
               except Exception as e:
                   return _err(e)
@@ -228,17 +292,17 @@ jobs:
 
           def tick():
               # 7/24 modu: sunucu kapaliysa tekrar ac, onay beklerse onayla
-              s = _s()
-              s.fetch()
-              st = str(s.status).lower()
               try:
+                  s = _s()
+                  s.fetch()
+                  st = str(s.status).lower()
                   if st == "offline":
                       s.start()
                   elif "confirm" in st:
                       s.confirm()
+                  return st
               except Exception as e:
-                  return st + " (" + str(e)[:40] + ")"
-              return st
+                  return "hata (" + str(e)[:40] + ")"
           EOF
 
           cat > app/src/main/java/com/gooo/panel/MainActivity.kt <<'EOF'
@@ -275,18 +339,28 @@ jobs:
                   web.addJavascriptInterface(Bridge(), "Native")
                   web.webChromeClient = object : WebChromeClient() {
                       override fun onShowFileChooser(
-                          w: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams
+                          w: WebView,
+                          cb: ValueCallback<Array<Uri>>,
+                          p: WebChromeClient.FileChooserParams
                       ): Boolean {
                           chooser?.onReceiveValue(null)
                           chooser = cb
-                          startActivityForResult(p.createIntent(), 7)
-                          return true
+                          return try {
+                              startActivityForResult(p.createIntent(), 7)
+                              true
+                          } catch (e: Exception) {
+                              chooser = null
+                              cb.onReceiveValue(null)
+                              false
+                          }
                       }
                   }
                   web.loadUrl("file:///android_asset/index.html")
               }
 
+              @Deprecated("Deprecated in Java")
               override fun onActivityResult(r: Int, c: Int, d: Intent?) {
+                  super.onActivityResult(r, c, d)
                   if (r == 7) {
                       chooser?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(c, d))
                       chooser = null
@@ -366,7 +440,7 @@ jobs:
                               val st = try { py.callAttr("tick").toString() }
                                        catch (e: Exception) { "hata: " + e.message }
                               nm.notify(1, note(st))
-                              Thread.sleep(30000)
+                              try { Thread.sleep(30000) } catch (e: InterruptedException) { break }
                           }
                       }.start()
                   }
@@ -492,22 +566,33 @@ jobs:
 
       - name: APK derle (pip bagimlilik varyantlarini sirayla dener)
         shell: bash
+        env:
+          PYVER: ${{ steps.detect.outputs.py }}
+          LXML_VER: ${{ steps.detect.outputs.lxml }}
         run: |
           cd P
           set +e
-          VARIANTS=(
-            'install("python-aternos")'
-            'install("lxml==5.2.1"); install("python-aternos")'
-            'install("lxml==4.9.3"); install("python-aternos")'
-            'install("lxml==4.9.2"); install("python-aternos")'
-          )
+
+          # Varyant 1: lxml'i Android wheel'i olan surume sabitle, gerisini pip cozsun
+          V1="install(\"lxml==$LXML_VER\"); install(\"python-aternos\")"
+
+          # Varyant 2: python-aternos'un lxml pin'i cakisirsa, bagimliliklari elle ver (--no-deps)
+          V2="options(\"--no-deps\"); install(\"lxml==$LXML_VER\")"
+          for p in python-aternos requests urllib3 idna certifi charset-normalizer \
+                   cloudscraper pyparsing requests-toolbelt js2py tzlocal six pyjsparser \
+                   regex websocket-client websockets; do
+            V2="$V2; install(\"$p\")"
+          done
+
+          VARIANTS=("$V1" "$V2")
           ok=0
           : > pip_errors.log
+          echo ">>> Python $PYVER / lxml $LXML_VER"
           for v in "${VARIANTS[@]}"; do
             echo ">>> Deneniyor: $v"
-            sed "s|__PIP__|$v|" app/build.gradle.kts.tpl > app/build.gradle.kts
+            sed -e "s|__PIP__|$v|" -e "s|__PYVER__|$PYVER|" app/build.gradle.kts.tpl > app/build.gradle.kts
             gradle assembleDebug --no-daemon --console=plain > build.log 2>&1
-            if [ $? -eq 0 ]; then ok=1; echo ">>> BASARILI: $v"; break; fi
+            if [ $? -eq 0 ]; then ok=1; echo ">>> BASARILI"; break; fi
             echo "### $v" >> pip_errors.log
             grep -E "ERROR|No matching distribution|Could not find a version|Could not build|incompatible|requires|conflict" build.log | grep -v "What went wrong" | head -8 >> pip_errors.log
             if ! grep -q "Execution failed for task ':app:generateDebugPythonRequirements'" build.log; then
@@ -529,6 +614,16 @@ jobs:
             echo "=========== SON ==========="
             exit 1
           fi
+
+      - name: Hata loglarini yukle
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            P/build.log
+            P/pip_errors.log
+          if-no-files-found: ignore
 
       - name: APK yukle
         uses: actions/upload-artifact@v4
