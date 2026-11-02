@@ -7,64 +7,16 @@ on:
 
 jobs:
   build:
-    # 22.04: setup-python'un eski surumleri (3.8-3.10) bu imajda kesin var
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # Chaquopy'nin lxml icin hangi Python surumunde Android wheel sundugunu
-      # canli olarak okur; hem Python surumunu hem lxml surumunu otomatik secer.
-      - name: lxml Android wheel tespit et
-        id: detect
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import os, re, sys, urllib.request
-
-          url = "https://chaquo.com/pypi-13.1/lxml/"
-          out = os.environ["GITHUB_OUTPUT"]
-          try:
-              html = urllib.request.urlopen(url, timeout=40).read().decode("utf-8", "replace")
-          except Exception as e:
-              print("UYARI: indeks okunamadi (%s), varsayilan 3.8 / 4.6.3 kullaniliyor" % e)
-              with open(out, "a") as f:
-                  f.write("py=3.8\nlxml=4.6.3\n")
-              sys.exit(0)
-
-          pat = re.compile(
-              r"lxml-([0-9][0-9.]*)-(\d+)-cp(\d)(\d+)-cp\d+-android_\d+_(arm64_v8a|armeabi_v7a)\.whl"
-          )
-          found = {}
-          for m in pat.finditer(html):
-              ver, _bld, a, b, abi = m.groups()
-              found.setdefault((int(a), int(b), ver), set()).add(abi)
-
-          print("Bulunan lxml Android wheel'leri:")
-          for k in sorted(found):
-              print("  py%d.%d lxml %s %s" % (k[0], k[1], k[2], sorted(found[k])))
-
-          # Chaquopy 15: Python 3.8-3.12, iki ABI de olmali
-          ok = [k for k, s in found.items() if len(s) == 2 and k[0] == 3 and 8 <= k[1] <= 12]
-          if not ok:
-              print("HATA: uygun lxml Android wheel'i yok")
-              sys.exit(1)
-
-          def key(k):
-              return (k[1], tuple(int(x) for x in k[2].split(".") if x.isdigit()))
-
-          best = max(ok, key=key)
-          py = "%d.%d" % (best[0], best[1])
-          print("SECILDI: Python %s, lxml %s" % (py, best[2]))
-          with open(out, "a") as f:
-              f.write("py=%s\nlxml=%s\n" % (py, best[2]))
-          PY
-
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ steps.detect.outputs.py }}
+          python-version: "3.11"
 
       - name: Android SDK hazirla (runner'da hazir gelir)
         run: |
@@ -78,7 +30,7 @@ jobs:
 
       - name: Proje dosyalarini uret
         run: |
-          mkdir -p P/app/src/main/{python,assets,java/com/gooo/panel}
+          mkdir -p P/app/src/main/{python,assets,java/com/gooo/panel,res/drawable,res/mipmap-anydpi,res/mipmap-anydpi-v26}
           cd P
 
           cat > settings.gradle.kts <<'EOF'
@@ -105,7 +57,7 @@ jobs:
           android.useAndroidX=true
           EOF
 
-          cat > app/build.gradle.kts.tpl <<'EOF'
+          cat > app/build.gradle.kts <<'EOF'
           plugins {
               id("com.android.application")
               id("org.jetbrains.kotlin.android")
@@ -116,7 +68,7 @@ jobs:
               compileSdk = 34
               defaultConfig {
                   applicationId = "com.gooo.panel"
-                  minSdk = 26
+                  minSdk = 24
                   targetSdk = 34
                   versionCode = 1
                   versionName = "1.0"
@@ -130,9 +82,9 @@ jobs:
           }
           chaquopy {
               defaultConfig {
-                  version = "__PYVER__"
+                  version = "3.11"
                   buildPython("python3")
-                  pip { __PIP__ }
+                  pip { install("python-aternos") }
               }
           }
           EOF
@@ -145,6 +97,7 @@ jobs:
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
               <uses-permission android:name="android.permission.WAKE_LOCK"/>
               <application android:label="Aternos Panel"
+                  android:icon="@mipmap/ic_launcher"
                   android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
@@ -161,14 +114,57 @@ jobs:
           </manifest>
           EOF
 
+          cat > app/src/main/res/drawable/ic_launcher_bg.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#12151C" android:pathData="M0,0 H108 V108 H0 Z"/>
+              <path android:fillColor="#00000000" android:strokeColor="#3B82F6" android:strokeWidth="2.5"
+                  android:pathData="M21,54 a33,33 0 1,0 66,0 a33,33 0 1,0 -66,0 Z"/>
+          </vector>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_launcher_fg.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#5FD068" android:pathData="M54,24 L80,39 L54,54 L28,39 Z"/>
+              <path android:fillColor="#8A5A33" android:pathData="M28,39 L54,54 L54,84 L28,69 Z"/>
+              <path android:fillColor="#6B4423" android:pathData="M80,39 L80,69 L54,84 L54,54 Z"/>
+              <path android:fillColor="#4CB556" android:pathData="M28,39 L54,54 L54,61 L28,46 Z"/>
+              <path android:fillColor="#3F9E49" android:pathData="M80,39 L80,46 L54,61 L54,54 Z"/>
+          </vector>
+          EOF
+
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@drawable/ic_launcher_bg"/>
+              <foreground android:drawable="@drawable/ic_launcher_fg"/>
+          </adaptive-icon>
+          EOF
+
+          cat > app/src/main/res/mipmap-anydpi/ic_launcher.xml <<'EOF'
+          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+              <item android:drawable="@drawable/ic_launcher_bg"/>
+              <item android:drawable="@drawable/ic_launcher_fg"/>
+          </layer-list>
+          EOF
+
           cat > app/src/main/python/bridge.py <<'EOF'
           import json
-          from python_aternos import Client
 
+          Client = None
+          Lists = None
+          _imp_err = None
           try:
-              from python_aternos import Lists
-          except Exception:
-              from python_aternos.atplayers import Lists
+              from python_aternos import Client, Lists
+          except Exception as e:
+              _imp_err = "python-aternos yuklenemedi: " + repr(e)
+
+
+          def _chk():
+              if _imp_err:
+                  raise RuntimeError(_imp_err)
 
           _at = None
           _dir = ""
@@ -193,18 +189,10 @@ jobs:
 
           def _s():
               global _at
+              _chk()
               if _at is None:
                   _at = Client.restore_session(_dir + "/session")
               return _at.list_servers()[_idx]
-
-
-          def _cfg(s):
-              # kutuphane surumune gore config/options/settings adlarindan biri
-              for n in ("config", "options", "settings"):
-                  o = getattr(s, n, None)
-                  if o is not None:
-                      return o() if callable(o) else o
-              raise RuntimeError("config API bulunamadi")
 
 
           def init(d):
@@ -216,6 +204,7 @@ jobs:
           def restore():
               global _at
               try:
+                  _chk()
                   _at = Client.restore_session(_dir + "/session")
                   _at.list_servers()
                   return _ok()
@@ -227,6 +216,7 @@ jobs:
           def login(user, pw):
               global _at
               try:
+                  _chk()
                   c = Client()
                   c.login(user, pw)
                   c.save_session(_dir + "/session")
@@ -261,10 +251,8 @@ jobs:
 
           def act(what):
               try:
-                  if what not in ("start", "stop", "restart", "confirm"):
-                      return _err("gecersiz islem")
                   s = _s()
-                  getattr(s, what)()
+                  getattr(s, what)()  # start / stop / restart / confirm
                   return _ok()
               except Exception as e:
                   return _err(e)
@@ -284,7 +272,7 @@ jobs:
 
           def prop(key, value):
               try:
-                  _cfg(_s()).set_server_prop(key, value)
+                  _s().options.set_server_prop(key, value)
                   return _ok()
               except Exception as e:
                   return _err(e)
@@ -292,17 +280,17 @@ jobs:
 
           def tick():
               # 7/24 modu: sunucu kapaliysa tekrar ac, onay beklerse onayla
+              s = _s()
+              s.fetch()
+              st = str(s.status).lower()
               try:
-                  s = _s()
-                  s.fetch()
-                  st = str(s.status).lower()
                   if st == "offline":
                       s.start()
                   elif "confirm" in st:
                       s.confirm()
-                  return st
               except Exception as e:
-                  return "hata (" + str(e)[:40] + ")"
+                  return st + " (" + str(e)[:40] + ")"
+              return st
           EOF
 
           cat > app/src/main/java/com/gooo/panel/MainActivity.kt <<'EOF'
@@ -313,6 +301,10 @@ jobs:
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
+          import android.graphics.Color
+          import android.util.Log
+          import android.widget.ScrollView
+          import android.widget.TextView
           import android.webkit.JavascriptInterface
           import android.webkit.ValueCallback
           import android.webkit.WebChromeClient
@@ -328,6 +320,22 @@ jobs:
 
               override fun onCreate(b: Bundle?) {
                   super.onCreate(b)
+                  try { setup() } catch (t: Throwable) { showError(t) }
+              }
+
+              private fun showError(t: Throwable) {
+                  val tv = TextView(this)
+                  tv.text = "Baslatma hatasi (ekran goruntusu al):\n\n" + Log.getStackTraceString(t)
+                  tv.setTextColor(Color.WHITE)
+                  tv.setTextIsSelectable(true)
+                  tv.setPadding(32, 96, 32, 32)
+                  val sv = ScrollView(this)
+                  sv.setBackgroundColor(Color.parseColor("#0f1115"))
+                  sv.addView(tv)
+                  setContentView(sv)
+              }
+
+              private fun setup() {
                   if (!Python.isStarted()) Python.start(AndroidPlatform(this))
                   Python.getInstance().getModule("bridge").callAttr("init", filesDir.absolutePath)
                   if (Build.VERSION.SDK_INT >= 33)
@@ -339,28 +347,18 @@ jobs:
                   web.addJavascriptInterface(Bridge(), "Native")
                   web.webChromeClient = object : WebChromeClient() {
                       override fun onShowFileChooser(
-                          w: WebView,
-                          cb: ValueCallback<Array<Uri>>,
-                          p: WebChromeClient.FileChooserParams
+                          w: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams
                       ): Boolean {
                           chooser?.onReceiveValue(null)
                           chooser = cb
-                          return try {
-                              startActivityForResult(p.createIntent(), 7)
-                              true
-                          } catch (e: Exception) {
-                              chooser = null
-                              cb.onReceiveValue(null)
-                              false
-                          }
+                          startActivityForResult(p.createIntent(), 7)
+                          return true
                       }
                   }
                   web.loadUrl("file:///android_asset/index.html")
               }
 
-              @Deprecated("Deprecated in Java")
               override fun onActivityResult(r: Int, c: Int, d: Intent?) {
-                  super.onActivityResult(r, c, d)
                   if (r == 7) {
                       chooser?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(c, d))
                       chooser = null
@@ -440,7 +438,7 @@ jobs:
                               val st = try { py.callAttr("tick").toString() }
                                        catch (e: Exception) { "hata: " + e.message }
                               nm.notify(1, note(st))
-                              try { Thread.sleep(30000) } catch (e: InterruptedException) { break }
+                              Thread.sleep(30000)
                           }
                       }.start()
                   }
@@ -524,10 +522,11 @@ jobs:
           const $=i=>document.getElementById(i);
           const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
           let timer=null;
+          const DEF='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108"><rect width="108" height="108" fill="#12151C"/><circle cx="54" cy="54" r="33" fill="none" stroke="#3B82F6" stroke-width="2.5"/><path fill="#5FD068" d="M54,24 L80,39 L54,54 L28,39Z"/><path fill="#8A5A33" d="M28,39 L54,54 L54,84 L28,69Z"/><path fill="#6B4423" d="M80,39 L80,69 L54,84 L54,54Z"/><path fill="#4CB556" d="M28,39 L54,54 L54,61 L28,46Z"/><path fill="#3F9E49" d="M80,39 L80,46 L54,61 L54,54Z"/></svg>');
 
           function skin(){
             const l=localStorage.getItem('logo'),b=localStorage.getItem('banner');
-            if(l)$('logo').style.backgroundImage='url('+l+')';
+            $('logo').style.backgroundImage='url("'+(l||DEF)+'")';
             if(b)$('banner').style.backgroundImage='url('+b+')';
           }
           function pick(w){
@@ -537,7 +536,7 @@ jobs:
           }
           function show(p){$('login').style.display=p?'none':'block';$('panel').style.display=p?'block':'none';
             if(p){skin();$('ka').checked=localStorage.getItem('ka')==='1';refresh();loadList();clearInterval(timer);timer=setInterval(refresh,10000)}}
-          async function boot(){const r=await py('restore');show(r.ok)}
+          async function boot(){const r=await py('restore');show(r.ok);if(!r.ok&&r.error&&!/No such file|Errno 2/.test(r.error))$('le').textContent=r.error}
           async function doLogin(){$('le').textContent='Baglaniyor...';
             const r=await py('login',$('u').value,$('p').value);
             if(r.ok)show(true);else $('le').textContent=r.error}
@@ -564,66 +563,17 @@ jobs:
           </script></body></html>
           EOF
 
-      - name: APK derle (pip bagimlilik varyantlarini sirayla dener)
+      - name: APK derle
         shell: bash
-        env:
-          PYVER: ${{ steps.detect.outputs.py }}
-          LXML_VER: ${{ steps.detect.outputs.lxml }}
         run: |
           cd P
-          set +e
+          gradle assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
 
-          # Varyant 1: lxml'i Android wheel'i olan surume sabitle, gerisini pip cozsun
-          V1="install(\"lxml==$LXML_VER\"); install(\"python-aternos\")"
-
-          # Varyant 2: python-aternos'un lxml pin'i cakisirsa, bagimliliklari elle ver (--no-deps)
-          V2="options(\"--no-deps\"); install(\"lxml==$LXML_VER\")"
-          for p in python-aternos requests urllib3 idna certifi charset-normalizer \
-                   cloudscraper pyparsing requests-toolbelt js2py tzlocal six pyjsparser \
-                   regex websocket-client websockets; do
-            V2="$V2; install(\"$p\")"
-          done
-
-          VARIANTS=("$V1" "$V2")
-          ok=0
-          : > pip_errors.log
-          echo ">>> Python $PYVER / lxml $LXML_VER"
-          for v in "${VARIANTS[@]}"; do
-            echo ">>> Deneniyor: $v"
-            sed -e "s|__PIP__|$v|" -e "s|__PYVER__|$PYVER|" app/build.gradle.kts.tpl > app/build.gradle.kts
-            gradle assembleDebug --no-daemon --console=plain > build.log 2>&1
-            if [ $? -eq 0 ]; then ok=1; echo ">>> BASARILI"; break; fi
-            echo "### $v" >> pip_errors.log
-            grep -E "ERROR|No matching distribution|Could not find a version|Could not build|incompatible|requires|conflict" build.log | grep -v "What went wrong" | head -8 >> pip_errors.log
-            if ! grep -q "Execution failed for task ':app:generateDebugPythonRequirements'" build.log; then
-              echo ">>> Hata pip kaynakli degil, deneme durduruluyor"
-              break
-            fi
-          done
-          if [ $ok -ne 1 ]; then
-            echo "=========== ASIL HATA (bunu kopyala) ==========="
-            grep -E "^e: " build.log | head -20
-            sed -n '/What went wrong/,/Try:/p' build.log | head -15
-            echo "--- pip denemeleri ---"
-            cat pip_errors.log
-            echo "--- logun son 40 satiri ---"
-            tail -40 build.log
-            ERR=$(sed -n '/What went wrong/,/Try:/p' build.log | head -4 | tr '\n' ' ')
-            PIP=$(tail -25 pip_errors.log | tr '\n' ' ')
-            echo "::error title=Gradle hatasi::$ERR PIP: $PIP"
-            echo "=========== SON ==========="
-            exit 1
-          fi
-
-      - name: Hata loglarini yukle
+      - name: Hata ozeti (sadece basarisiz olursa)
         if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: |
-            P/build.log
-            P/pip_errors.log
-          if-no-files-found: ignore
+        run: |
+          echo "=========== HATA OZETI ==========="
+          grep -nE "^e: |error:|What went wrong|Execution failed|Could not|FAILED|ERROR|No matching|pip" -A4 P/build.log | head -80
 
       - name: APK yukle
         uses: actions/upload-artifact@v4
