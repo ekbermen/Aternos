@@ -503,6 +503,9 @@ jobs:
             echo
             echo "=========== ASIL HATA (bunu kopyala) ==========="
             grep -E "^e: " build.log | head -20
+            echo "--- pip ---"
+            grep -E "ERROR|No matching distribution|Could not find a version|Could not build|requires|incompatible|Failed" build.log | grep -v "What went wrong" | head -25
+            echo "--- /pip ---"
             sed -n '/What went wrong/,/Try:/p' build.log | head -30
             ERR=$(sed -n '/What went wrong/,/Try:/p' build.log | head -8 | tr '\n' ' ')
             echo "::error title=Gradle hatasi::$ERR"
