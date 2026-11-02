@@ -494,13 +494,16 @@ jobs:
         shell: bash
         run: |
           cd P
-          gradle assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
-
-      - name: Hata ozeti (sadece basarisiz olursa)
-        if: failure()
-        run: |
-          echo "=========== HATA OZETI ==========="
-          grep -nE "^e: |error:|What went wrong|Execution failed|Could not|FAILED|ERROR|No matching|pip" -A4 P/build.log | head -80
+          set +e
+          gradle assembleDebug --no-daemon --console=plain > build.log 2>&1
+          code=$?
+          echo "=========== HATA OZETI (bunu kopyala) ==========="
+          if [ $code -ne 0 ]; then
+            grep -nE "^e: |error:|What went wrong|Execution failed|Could not|FAILED|ERROR|No matching|pip" -A6 build.log | head -60
+            echo "--- son 40 satir ---"
+            tail -40 build.log
+          fi
+          exit $code
 
       - name: APK yukle
         uses: actions/upload-artifact@v4
