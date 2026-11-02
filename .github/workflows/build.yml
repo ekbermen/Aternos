@@ -88,11 +88,7 @@ jobs:
                       // lxml surumu workflow'da Chaquopy'nin gercekten sundugu wheel'lerden secilir
                       options("--no-deps")
                       // DEPS_PLACEHOLDER
-                      // lxml'in native bagimliliklari: --no-deps oldugu icin elle ekleniyor
-                      install("chaquopy-libcxx")
-                      install("chaquopy-libiconv")
-                      install("chaquopy-libxml2")
-                      install("chaquopy-libxslt")
+                      // NATIVE_PLACEHOLDER
                       install("lxml==LXML_VERSION")
                       install("python-aternos")
                   }
@@ -591,8 +587,101 @@ jobs:
             fi
           done
           echo "Secilen lxml: $VER"
+          echo "LXML_VER=$VER" >> "$GITHUB_ENV"
           sed -i "s/LXML_VERSION/$VER/" P/app/build.gradle.kts
           grep -n lxml P/app/build.gradle.kts
+
+      - name: lxml native kutuphane surumlerini wheel metadata'sindan oku
+        shell: bash
+        run: |
+          # lxml wheel'i hangi libxml2/libxslt surumuyle derlendiyse tam o surumleri kurar.
+          # Surum uyusmazligi (ABI) uygulamanin acilista cokmesine yol acar.
+          python3 - "$LXML_VER" P/app/build.gradle.kts <<'PY'
+          import io, os, re, sys, zipfile, urllib.request
+          from urllib.parse import urljoin
+
+          BASE = os.environ.get("CHAQ_INDEX", "https://chaquo.com/pypi-13.1")
+          VER = sys.argv[1]
+          GRADLE = sys.argv[2]
+          FALLBACK = ["chaquopy-libcxx", "chaquopy-libiconv", "chaquopy-libxml2", "chaquopy-libxslt"]
+
+          def get(u):
+              return urllib.request.urlopen(u, timeout=60).read()
+
+          def norm(n):
+              return re.sub(r"[-_.]+", "_", n).lower()
+
+          def vkey(v):
+              return tuple(int(x) for x in re.findall(r"\d+", v))
+
+          def find_wheel(pkg, ver=None, cp=None):
+              url = "%s/%s/" % (BASE, pkg)
+              html = get(url).decode()
+              best = None
+              for h in re.findall(r'href="([^"#]+\.whl)', html):
+                  fn = os.path.basename(h)
+                  if not fn.startswith(norm(pkg) + "-") and not fn.startswith(pkg + "-"):
+                      continue
+                  if not re.search(r"android_\d+_arm64_v8a", fn):
+                      continue
+                  if cp and cp not in fn:
+                      continue
+                  parts = fn.split("-")
+                  v = parts[1]
+                  if ver and v != ver:
+                      continue
+                  build = int(parts[2]) if parts[2].isdigit() else 0
+                  key = (vkey(v), build)
+                  if best is None or key > best[0]:
+                      best = (key, v, urljoin(url, h))
+              if best is None:
+                  raise RuntimeError("wheel bulunamadi: %s %s" % (pkg, ver or ""))
+              return best[1], best[2]
+
+          def chaquopy_requires(whl):
+              z = zipfile.ZipFile(io.BytesIO(whl))
+              md = [n for n in z.namelist() if n.endswith(".dist-info/METADATA")][0]
+              out = []
+              for line in z.read(md).decode().splitlines():
+                  if not line.startswith("Requires-Dist:"):
+                      continue
+                  req, _, marker = line.split(":", 1)[1].strip().partition(";")
+                  if "extra" in marker:
+                      continue
+                  m = re.match(r"\s*([A-Za-z0-9_.-]+)\s*\(?\s*([<>=!~][^)]*)?\)?\s*$", req)
+                  if m and m.group(1).lower().startswith("chaquopy-"):
+                      out.append((m.group(1).lower(), (m.group(2) or "").replace(" ", "")))
+              return out
+
+          pins = {}
+          def visit(pkg, spec=""):
+              if pkg in pins:
+                  return
+              want = spec[2:] if spec.startswith("==") else None
+              v, url = find_wheel(pkg, want)
+              pins[pkg] = v
+              for p, s in chaquopy_requires(get(url)):
+                  visit(p, s)
+
+          try:
+              _, lurl = find_wheel("lxml", VER, "cp311")
+              for p, s in chaquopy_requires(get(lurl)):
+                  visit(p, s)
+              if not pins:
+                  raise RuntimeError("lxml wheel'i native bagimlilik bildirmiyor")
+              lines = ['install("%s==%s")' % (p, v) for p, v in sorted(pins.items())]
+              print("lxml wheel'inden okunan native pinler:", ", ".join("%s==%s" % kv for kv in sorted(pins.items())))
+          except Exception as e:
+              print("::warning::native pinler okunamadi (%r), pinsiz yedek liste kullaniliyor" % (e,))
+              lines = ['install("%s")' % p for p in FALLBACK]
+
+          t = open(GRADLE).read()
+          pat = re.compile(r"^([ \t]*)// NATIVE_PLACEHOLDER\n", re.M)
+          assert pat.search(t), "NATIVE_PLACEHOLDER bulunamadi"
+          t = pat.sub(lambda m: "".join(m.group(1) + l + "\n" for l in lines), t)
+          open(GRADLE, "w").write(t)
+          PY
+          grep -n 'install(' P/app/build.gradle.kts
 
       - name: Python bagimliliklarini otomatik coz
         shell: bash
