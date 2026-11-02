@@ -491,9 +491,16 @@ jobs:
           EOF
 
       - name: APK derle
+        shell: bash
         run: |
           cd P
-          gradle assembleDebug --no-daemon --stacktrace
+          gradle assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
+
+      - name: Hata ozeti (sadece basarisiz olursa)
+        if: failure()
+        run: |
+          echo "=========== HATA OZETI ==========="
+          grep -nE "^e: |error:|What went wrong|Execution failed|Could not|FAILED|ERROR|No matching|pip" -A4 P/build.log | head -80
 
       - name: APK yukle
         uses: actions/upload-artifact@v4
