@@ -84,7 +84,22 @@ jobs:
               defaultConfig {
                   version = "3.11"
                   buildPython("python3")
-                  pip { install("python-aternos") }
+                  pip {
+                      // python-aternos lxml==4.9.2 sabitliyor, Chaquopy'de yok -> bagimliliklari elle veriyoruz
+                      options("--no-deps")
+                      install("requests")
+                      install("urllib3")
+                      install("idna")
+                      install("certifi")
+                      install("charset-normalizer")
+                      install("pyparsing")
+                      install("requests-toolbelt")
+                      install("cloudscraper")
+                      install("websockets")
+                      install("typing-extensions")
+                      install("lxml==4.9.3")
+                      install("python-aternos")
+                  }
               }
           }
           EOF
