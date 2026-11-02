@@ -57,7 +57,7 @@ jobs:
           android.useAndroidX=true
           EOF
 
-          cat > app/build.gradle.kts <<'EOF'
+          cat > app/build.gradle.kts.tpl <<'EOF'
           plugins {
               id("com.android.application")
               id("org.jetbrains.kotlin.android")
@@ -68,7 +68,7 @@ jobs:
               compileSdk = 34
               defaultConfig {
                   applicationId = "com.gooo.panel"
-                  minSdk = 24
+                  minSdk = 26
                   targetSdk = 34
                   versionCode = 1
                   versionName = "1.0"
@@ -84,7 +84,7 @@ jobs:
               defaultConfig {
                   version = "3.11"
                   buildPython("python3")
-                  pip { install("python-aternos") }
+                  pip { __PIP__ }
               }
           }
           EOF
@@ -490,28 +490,45 @@ jobs:
           </script></body></html>
           EOF
 
-      - name: APK derle
+      - name: APK derle (pip bagimlilik varyantlarini sirayla dener)
         shell: bash
         run: |
           cd P
           set +e
-          gradle assembleDebug --no-daemon --console=plain > build.log 2>&1
-          code=$?
-          if [ $code -ne 0 ]; then
-            echo "--- logun son 60 satiri ---"
-            tail -60 build.log
-            echo
+          VARIANTS=(
+            'install("python-aternos")'
+            'install("lxml==5.2.1"); install("python-aternos")'
+            'install("lxml==4.9.3"); install("python-aternos")'
+            'install("lxml==4.9.2"); install("python-aternos")'
+          )
+          ok=0
+          : > pip_errors.log
+          for v in "${VARIANTS[@]}"; do
+            echo ">>> Deneniyor: $v"
+            sed "s|__PIP__|$v|" app/build.gradle.kts.tpl > app/build.gradle.kts
+            gradle assembleDebug --no-daemon --console=plain > build.log 2>&1
+            if [ $? -eq 0 ]; then ok=1; echo ">>> BASARILI: $v"; break; fi
+            echo "### $v" >> pip_errors.log
+            grep -E "ERROR|No matching distribution|Could not find a version|Could not build|incompatible|requires|conflict" build.log | grep -v "What went wrong" | head -8 >> pip_errors.log
+            if ! grep -q "Execution failed for task ':app:generateDebugPythonRequirements'" build.log; then
+              echo ">>> Hata pip kaynakli degil, deneme durduruluyor"
+              break
+            fi
+          done
+          if [ $ok -ne 1 ]; then
             echo "=========== ASIL HATA (bunu kopyala) ==========="
             grep -E "^e: " build.log | head -20
-            echo "--- pip ---"
-            grep -E "ERROR|No matching distribution|Could not find a version|Could not build|requires|incompatible|Failed" build.log | grep -v "What went wrong" | head -25
-            echo "--- /pip ---"
-            sed -n '/What went wrong/,/Try:/p' build.log | head -30
-            ERR=$(sed -n '/What went wrong/,/Try:/p' build.log | head -8 | tr '\n' ' ')
-            echo "::error title=Gradle hatasi::$ERR"
+            sed -n '/What went wrong/,/Try:/p' build.log | head -15
+            echo "--- pip denemeleri ---"
+            cat pip_errors.log
+            echo "--- logun son 40 satiri ---"
+            tail -40 build.log
+            ERR=$(sed -n '/What went wrong/,/Try:/p' build.log | head -4 | tr '\n' ' ')
+            PIP=$(tail -25 pip_errors.log | tr '\n' ' ')
+            echo "::error title=Gradle hatasi::$ERR PIP: $PIP"
             echo "=========== SON ==========="
+            exit 1
           fi
-          exit $code
 
       - name: APK yukle
         uses: actions/upload-artifact@v4
