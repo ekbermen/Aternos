@@ -97,6 +97,11 @@ jobs:
                       install("cloudscraper")
                       install("websockets")
                       install("typing-extensions")
+                      // lxml'in native bagimliliklari: --no-deps oldugu icin elle ekleniyor
+                      install("chaquopy-libcxx")
+                      install("chaquopy-libiconv")
+                      install("chaquopy-libxml2")
+                      install("chaquopy-libxslt")
                       install("lxml==LXML_VERSION")
                       install("python-aternos")
                   }
@@ -587,6 +592,13 @@ jobs:
             echo "::warning::Indeks okunamadi, 4.9.2'ye dusuldu"
             VER=4.9.2
           fi
+          for P in chaquopy-libcxx chaquopy-libiconv chaquopy-libxml2 chaquopy-libxslt; do
+            if curl -fsSL "https://chaquo.com/pypi-13.1/$P/" | grep -q "cp311\|py3\|android"; then
+              echo "var: $P"
+            else
+              echo "::warning::$P indekste bulunamadi"
+            fi
+          done
           echo "Secilen lxml: $VER"
           sed -i "s/LXML_VERSION/$VER/" P/app/build.gradle.kts
           grep -n lxml P/app/build.gradle.kts
