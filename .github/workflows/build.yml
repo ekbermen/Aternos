@@ -30,7 +30,7 @@ jobs:
 
       - name: Proje dosyalarini uret
         run: |
-          mkdir -p P/app/src/main/{python,assets,java/com/gooo/panel,res/drawable,res/mipmap-anydpi,res/mipmap-anydpi-v26}
+          mkdir -p P/app/src/main/{python,assets,java/com/gooo/panel,res/drawable,res/mipmap-anydpi-v26}
           cd P
 
           cat > settings.gradle.kts <<'EOF'
@@ -68,7 +68,7 @@ jobs:
               compileSdk = 34
               defaultConfig {
                   applicationId = "com.gooo.panel"
-                  minSdk = 24
+                  minSdk = 26
                   targetSdk = 34
                   versionCode = 1
                   versionName = "1.0"
@@ -141,13 +141,6 @@ jobs:
               <background android:drawable="@drawable/ic_launcher_bg"/>
               <foreground android:drawable="@drawable/ic_launcher_fg"/>
           </adaptive-icon>
-          EOF
-
-          cat > app/src/main/res/mipmap-anydpi/ic_launcher.xml <<'EOF'
-          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-              <item android:drawable="@drawable/ic_launcher_bg"/>
-              <item android:drawable="@drawable/ic_launcher_fg"/>
-          </layer-list>
           EOF
 
           cat > app/src/main/python/bridge.py <<'EOF'
