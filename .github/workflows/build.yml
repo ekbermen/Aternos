@@ -97,6 +97,7 @@ jobs:
                       install("cloudscraper")
                       install("websockets")
                       install("typing-extensions")
+                      install("regex")
                       // lxml'in native bagimliliklari: --no-deps oldugu icin elle ekleniyor
                       install("chaquopy-libcxx")
                       install("chaquopy-libiconv")
