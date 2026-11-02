@@ -103,6 +103,7 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
               <uses-permission android:name="android.permission.WAKE_LOCK"/>
+          <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
               <application android:label="Aternos Panel"
                   android:icon="@mipmap/ic_launcher"
                   android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
@@ -151,7 +152,7 @@ jobs:
           EOF
 
           cat > app/src/main/python/bridge.py <<'EOF'
-          import json
+          import json, os, time, datetime
 
           Client = None
           Lists = None
@@ -171,13 +172,27 @@ jobs:
           _idx = 0
 
 
+          def _isnet(e):
+              m = str(e)
+              return any(x in m for x in ("NameResolution", "Errno 7", "Max retries", "Failed to resolve", "timed out", "Connection"))
+
+
+          def _nice(e):
+              m = str(e)
+              if _isnet(e):
+                  return "Internet/DNS yok. Baglanti gelince otomatik tekrar denenecek."
+              if "Cloudflare" in m or "403" in m:
+                  return "Aternos erisimi gecici engelledi (Cloudflare). Biraz bekle."
+              return m[:160]
+
+
           def _ok(**k):
               k["ok"] = True
               return json.dumps(k)
 
 
           def _err(e):
-              return json.dumps({"ok": False, "error": str(e)})
+              return json.dumps({"ok": False, "error": _nice(e)})
 
 
           def _g(o, n, d=None):
@@ -187,22 +202,37 @@ jobs:
                   return d
 
 
-          def _servers():
-              # python-aternos surumleri arasinda list_servers farkli yerde olabiliyor
-              for o in (_at, _g(_at, "account"), _g(_at, "atclient")):
-                  f = _g(o, "list_servers") if o is not None else None
-                  if callable(f):
+          def _retry(f, n=3):
+              for i in range(n):
+                  try:
                       return f()
-              names = ", ".join(n for n in dir(_at) if not n.startswith("_"))
-              raise RuntimeError("list_servers bulunamadi. Client ozellikleri: " + names)
+                  except Exception as e:
+                      if i == n - 1 or not _isnet(e):
+                          raise
+                      time.sleep(2 * (i + 1))
 
 
           def _s():
-              global _at
-              _chk()
-              if _at is None:
-                  _at = Client.restore_session(_dir + "/session")
-              return _servers()[_idx]
+              def go():
+                  global _at
+                  _chk()
+                  if _at is None:
+                      _at = Client.restore_session(_dir + "/session")
+                  return _at.list_servers()[_idx]
+              return _retry(go)
+
+
+          def _jl(n, d):
+              try:
+                  with open(_dir + "/" + n) as f:
+                      return json.load(f)
+              except Exception:
+                  return d
+
+
+          def _js(n, v):
+              with open(_dir + "/" + n, "w") as f:
+                  json.dump(v, f)
 
 
           def init(d):
@@ -216,7 +246,7 @@ jobs:
               try:
                   _chk()
                   _at = Client.restore_session(_dir + "/session")
-                  _servers()
+                  _retry(lambda: _at.list_servers())
                   return _ok()
               except Exception as e:
                   _at = None
@@ -228,7 +258,7 @@ jobs:
               try:
                   _chk()
                   c = Client()
-                  c.login(user, pw)
+                  _retry(lambda: c.login(user, pw))
                   c.save_session(_dir + "/session")
                   _at = c
                   return _ok()
@@ -242,18 +272,43 @@ jobs:
               return _ok()
 
 
+          def _track(s):
+              # giris/cikis gecmisi + arkadas bildirimi (state ve tick ortak kullanir)
+              c = _jl("cfg.json", {})
+              cur = [str(p) for p in (_g(s, "players_list", []) or [])]
+              prev = _jl("online.json", [])
+              ev = _jl("hist.json", [])
+              now = datetime.datetime.now()
+              t, ts, alert = now.strftime("%d.%m %H:%M"), int(time.time()), []
+              fr = [x.lower() for x in c.get("friends", [])]
+              for p in cur:
+                  if p not in prev:
+                      ev.append({"t": t, "ts": ts, "p": p, "e": "+"})
+                      if c.get("notifyAll") or p.lower() in fr:
+                          alert.append(p)
+              for p in prev:
+                  if p not in cur:
+                      ev.append({"t": t, "ts": ts, "p": p, "e": "-"})
+              _js("online.json", cur)
+              _js("hist.json", ev[-300:])
+              return cur, alert
+
+
           def state():
               try:
                   s = _s()
-                  s.fetch()
+                  _retry(s.fetch)
+                  cur, _a = _track(s)
                   return _ok(
                       name=str(_g(s, "address", "")),
+                      host=str(_g(s, "domain", "")),
+                      port=str(_g(s, "port", "")),
                       status=str(_g(s, "status", "?")),
                       players=_g(s, "players_count", 0),
                       slots=_g(s, "slots", 0),
                       version=str(_g(s, "version", "")),
                       software=str(_g(s, "software", "")),
-                      online=[str(p) for p in (_g(s, "players_list", []) or [])],
+                      online=cur,
                   )
               except Exception as e:
                   return _err(e)
@@ -288,19 +343,61 @@ jobs:
                   return _err(e)
 
 
-          def tick():
-              # 7/24 modu: sunucu kapaliysa tekrar ac, onay beklerse onayla
-              s = _s()
-              s.fetch()
-              st = str(s.status).lower()
+          def cfg_set(j):
+              _js("cfg.json", json.loads(j))
+              return _ok()
+
+
+          def cfg_get():
+              return _ok(cfg=_jl("cfg.json", {}))
+
+
+          def hist():
+              ev = _jl("hist.json", [])
+              tot, st = {}, {}
+              for e in ev:
+                  if e["e"] == "+":
+                      st[e["p"]] = e["ts"]
+                  elif e["p"] in st:
+                      tot[e["p"]] = tot.get(e["p"], 0) + e["ts"] - st.pop(e["p"])
+              for p, t0 in st.items():
+                  tot[p] = tot.get(p, 0) + int(time.time()) - t0
+              return _ok(items=ev[-60:][::-1], play=tot)
+
+
+          def _due(sch, c, now):
               try:
-                  if st == "offline":
-                      s.start()
-                  elif "confirm" in st:
-                      s.confirm()
+                  h, m = map(int, sch.split(":"))
+              except Exception:
+                  return False
+              d = (now - now.replace(hour=h, minute=m, second=0, microsecond=0)).total_seconds()
+              return 0 <= d < 300 and c.get("fired") != now.strftime("%Y-%m-%d")
+
+
+          def tick():
+              # 7/24 + zamanlama + arkadas bildirimi. Cikti: "durum|bildirim metni"
+              try:
+                  c = _jl("cfg.json", {})
+                  now = datetime.datetime.now()
+                  s = _s()
+                  _retry(s.fetch)
+                  st = str(s.status).lower()
+                  try:
+                      if "confirm" in st:
+                          s.confirm()
+                      elif st == "offline":
+                          if c.get("ka"):
+                              s.start()
+                          elif c.get("sched") and _due(c["sched"], c, now):
+                              c["fired"] = now.strftime("%Y-%m-%d")
+                              _js("cfg.json", c)
+                              s.start()
+                  except Exception as e:
+                      st = st + " (" + _nice(e)[:40] + ")"
+                  _cur, alert = _track(s)
+                  return st + "|" + ", ".join(alert)
               except Exception as e:
-                  return st + " (" + str(e)[:40] + ")"
-              return st
+                  return "hata: " + _nice(e) + "|"
           EOF
 
           cat > app/src/main/java/com/gooo/panel/MainActivity.kt <<'EOF'
@@ -395,6 +492,34 @@ jobs:
                   }
 
                   @JavascriptInterface
+                  fun copy(t: String) = runOnUiThread {
+                      (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+                          .setPrimaryClip(android.content.ClipData.newPlainText("a", t))
+                  }
+
+                  @JavascriptInterface
+                  fun share(t: String) = runOnUiThread {
+                      val i = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, t)
+                      startActivity(Intent.createChooser(i, null))
+                  }
+
+                  @JavascriptInterface
+                  fun mc(name: String, hostPort: String) = runOnUiThread {
+                      try {
+                          startActivity(Intent(Intent.ACTION_VIEW,
+                              Uri.parse("minecraft://?addExternalServer=" + Uri.encode(name) + "|" + hostPort)))
+                      } catch (e: Exception) { }
+                  }
+
+                  @JavascriptInterface
+                  fun battery() = runOnUiThread {
+                      try {
+                          startActivity(Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                              Uri.parse("package:$packageName")))
+                      } catch (e: Exception) { }
+                  }
+
+                  @JavascriptInterface
                   fun keepAlive(on: Boolean) {
                       val i = Intent(this@MainActivity, KeepAlive::class.java)
                       if (on) startForegroundService(i) else stopService(i)
@@ -414,161 +539,246 @@ jobs:
           import android.content.pm.ServiceInfo
           import android.os.Build
           import android.os.IBinder
+          import android.os.PowerManager
           import com.chaquo.python.Python
           import com.chaquo.python.android.AndroidPlatform
 
           class KeepAlive : Service() {
               @Volatile private var run = false
+              private var wl: PowerManager.WakeLock? = null
 
               override fun onBind(i: Intent?): IBinder? = null
 
               private fun note(t: String): Notification =
                   Notification.Builder(this, "ka")
-                      .setContentTitle("7/24 modu aktif")
+                      .setContentTitle("Panel arka planda calisiyor")
                       .setContentText(t)
                       .setSmallIcon(android.R.drawable.ic_popup_sync)
                       .setOngoing(true)
                       .build()
 
+              private fun alert(t: String): Notification =
+                  Notification.Builder(this, "al")
+                      .setContentTitle("Oyuncu girdi")
+                      .setContentText(t)
+                      .setSmallIcon(android.R.drawable.ic_dialog_info)
+                      .setAutoCancel(true)
+                      .build()
+
               override fun onStartCommand(i: Intent?, f: Int, s: Int): Int {
                   val nm = getSystemService(NotificationManager::class.java)
-                  nm.createNotificationChannel(
-                      NotificationChannel("ka", "7/24", NotificationManager.IMPORTANCE_LOW)
-                  )
+                  nm.createNotificationChannel(NotificationChannel("ka", "Arka plan", NotificationManager.IMPORTANCE_LOW))
+                  nm.createNotificationChannel(NotificationChannel("al", "Oyuncu bildirimi", NotificationManager.IMPORTANCE_DEFAULT))
                   if (Build.VERSION.SDK_INT >= 34)
                       startForeground(1, note("basliyor"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
                   else startForeground(1, note("basliyor"))
+                  if (wl == null) {
+                      wl = getSystemService(PowerManager::class.java)
+                          .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "panel:ka")
+                      wl?.acquire()
+                  }
                   if (!Python.isStarted()) Python.start(AndroidPlatform(this))
                   val py = Python.getInstance().getModule("bridge")
                   py.callAttr("init", filesDir.absolutePath)
                   if (!run) {
                       run = true
                       Thread {
+                          var fail = 0
                           while (run) {
-                              val st = try { py.callAttr("tick").toString() }
-                                       catch (e: Exception) { "hata: " + e.message }
-                              nm.notify(1, note(st))
-                              Thread.sleep(30000)
+                              val out = try { py.callAttr("tick").toString() } catch (e: Exception) { "hata: " + e.message + "|" }
+                              val p = out.split("|", limit = 2)
+                              if (p[0].startsWith("hata")) fail++ else fail = 0
+                              nm.notify(1, note(p[0]))
+                              if (p.size > 1 && p[1].isNotBlank()) nm.notify(2, alert(p[1]))
+                              // hata olursa bekleme suresi 30 -> 60 -> 120 -> 240 sn (internet gelince normale doner)
+                              try { Thread.sleep(minOf(30000L shl minOf(fail, 3), 240000L)) } catch (e: InterruptedException) { }
                           }
                       }.start()
                   }
                   return START_STICKY
               }
 
-              override fun onDestroy() { run = false }
+              override fun onDestroy() {
+                  run = false
+                  wl?.release()
+                  wl = null
+              }
           }
           EOF
 
           cat > app/src/main/assets/index.html <<'EOF'
           <!doctype html><html><head><meta charset="utf-8">
-          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
           <style>
-          body{margin:0;background:#0f1115;color:#e8e8e8;font-family:sans-serif;padding-bottom:40px}
-          .card{background:#1a1d24;margin:10px;padding:14px;border-radius:12px}
-          button{background:#3b82f6;color:#fff;border:0;border-radius:8px;padding:10px 14px;margin:3px}
-          button.r{background:#ef4444}button.g{background:#22c55e}button.x{background:#444}
-          input,select{background:#0f1115;color:#fff;border:1px solid #333;border-radius:8px;padding:9px;width:100%;box-sizing:border-box;margin:4px 0}
-          #banner{height:130px;background:#222 center/cover}
-          #logo{width:64px;height:64px;border-radius:12px;background:#333 center/cover;margin:-32px 14px 0;position:relative;border:3px solid #0f1115}
-          .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-          .it{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #2a2d35}
-          #st{font-size:22px;font-weight:bold}
-          small{color:#999}
+          :root{--a:#3b82f6;--bg:#0b0d12;--c:#151921;--c2:#1d222d;--t:#eef1f6;--m:#8b93a3}
+          *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+          body{margin:0;background:var(--bg);color:var(--t);font-family:system-ui,sans-serif;padding-bottom:84px}
+          .tab{display:none;padding:0 12px}.tab.on{display:block}
+          #banner{height:150px;margin:0 -12px;background:linear-gradient(135deg,var(--a),#111) center/cover;border-radius:0 0 28px 28px}
+          #logo{width:72px;height:72px;border-radius:20px;background:#222 center/cover;margin:-36px 18px 0;position:relative;border:4px solid var(--bg)}
+          .card{background:var(--c);margin:12px 0;padding:16px;border-radius:20px;box-shadow:0 4px 18px #0006}
+          h3{margin:0 0 8px;font-size:16px}
+          small,.m{color:var(--m)}
+          .pill{display:inline-block;padding:5px 14px;border-radius:99px;font-weight:700;font-size:14px;background:#444}
+          .pill.online{background:#16a34a33;color:#4ade80}.pill.offline{background:#dc262633;color:#f87171}.pill.wait{background:#f59e0b33;color:#fbbf24}
+          .addr{font-size:17px;margin:10px 0 4px;font-weight:600;word-break:break-all}
+          .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+          button{background:var(--a);color:#fff;border:0;border-radius:14px;padding:13px;font-size:15px;font-weight:600}
+          button:active{transform:scale(.97)}
+          button.g{background:#16a34a}button.r{background:#dc2626}button.x{background:var(--c2);color:var(--t)}button.s{padding:7px 12px;font-size:13px;border-radius:10px}
+          input,select,textarea{background:var(--c2);color:var(--t);border:1px solid #2b313d;border-radius:12px;padding:12px;width:100%;margin:5px 0;font-size:15px}
+          .row{display:flex;gap:8px;align-items:center}.row>*{flex:1}.row>.f{flex:0 0 auto}
+          .it{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid #232834}
+          .chips{display:flex;gap:8px;flex-wrap:wrap}.chip{background:var(--c2);padding:9px 14px;border-radius:99px;font-size:14px}.chip.on{background:var(--a)}
+          .sw{position:relative;width:52px;height:30px;flex:0 0 52px}.sw input{opacity:0;width:100%;height:100%;margin:0;position:absolute;z-index:2}
+          .sw i{position:absolute;inset:0;background:#374151;border-radius:99px;transition:.2s}.sw i:after{content:"";position:absolute;left:3px;top:3px;width:24px;height:24px;border-radius:50%;background:#fff;transition:.2s}
+          .sw input:checked+i{background:var(--a)}.sw input:checked+i:after{left:25px}
+          nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:#10131ad9;backdrop-filter:blur(14px);padding:8px 6px calc(8px + env(safe-area-inset-bottom));border-top:1px solid #232834}
+          nav div{flex:1;text-align:center;font-size:11px;color:var(--m);padding:4px}nav div b{display:block;font-size:22px;font-weight:400}nav .on{color:var(--a)}
+          #toast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%);background:#000d;padding:11px 18px;border-radius:99px;font-size:14px;opacity:0;pointer-events:none;transition:.25s;max-width:90%;text-align:center}#toast.show{opacity:1}
+          .inv{background:linear-gradient(135deg,var(--a),#1d222d);border-radius:18px;padding:18px;white-space:pre-line;font-weight:600;line-height:1.6}
+          .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px}
           </style></head><body>
 
-          <div id="login" class="card" style="display:none">
+          <div id="login" class="card" style="display:none;margin:60px 12px">
             <h3>Aternos girisi</h3>
             <input id="u" placeholder="Kullanici adi"><input id="p" type="password" placeholder="Sifre">
-            <button onclick="doLogin()">Giris</button> <small id="le"></small>
+            <button style="width:100%;margin-top:8px" onclick="doLogin()">Giris</button><small id="le"></small>
           </div>
 
           <div id="panel" style="display:none">
+          <div id="t0" class="tab on">
             <div id="banner"></div><div id="logo"></div>
             <div class="card">
-              <div id="nm">-</div><div id="st">-</div>
-              <small id="info"></small>
-              <div class="row" style="margin-top:8px">
-                <button class="g" onclick="act('start')">Baslat</button>
-                <button class="r" onclick="act('stop')">Durdur</button>
-                <button onclick="act('restart')">Yeniden</button>
-                <button class="x" onclick="act('confirm')">Onayla</button>
+              <span id="st" class="pill">-</span>
+              <div class="addr" id="nm">-</div><small id="info"></small>
+              <div class="grid">
+                <button class="g" onclick="act('start')">Baslat</button><button class="r" onclick="act('stop')">Durdur</button>
+                <button onclick="act('restart')">Yeniden</button><button class="x" onclick="act('confirm')">Onayla</button>
               </div>
-              <small id="msg"></small>
+              <div class="grid">
+                <button class="x" onclick="cp()">Adresi kopyala</button><button class="x" onclick="openMc()">Minecraft'i ac</button>
+              </div>
             </div>
-
             <div class="card">
-              <b>7/24 modu</b><br><small>Kapanirsa otomatik tekrar acar (30 sn kontrol).</small>
-              <div class="row"><input type="checkbox" id="ka" style="width:auto" onchange="toggleKA()"> <span>Aktif</span></div>
+              <div class="row"><div><h3>7/24 modu</h3><small>Kapaliysa tekrar acar, onay bekleyince onaylar</small></div>
+                <label class="sw f"><input type="checkbox" id="ka" onchange="sync()"><i></i></label></div>
+              <div class="row" style="margin-top:10px"><div><b>Zamanli ac</b><br><small>Her gun bu saatte (bos = kapali)</small></div>
+                <input type="time" id="sch" class="f" style="width:130px" onchange="sync()"></div>
+              <button class="x s" style="margin-top:10px" onclick="Native.battery()">Pil kisitlamasini kaldir (onerilir)</button>
             </div>
-
-            <div class="card">
-              <b>Oyuncu listeleri</b>
-              <select id="kind" onchange="loadList()">
-                <option value="whl">Whitelist</option><option value="ops">Operatorler</option><option value="ban">Banlilar</option>
-              </select>
-              <div class="row"><input id="pn" placeholder="Oyuncu adi" style="flex:1"><button onclick="listAct('add')">Ekle</button></div>
-              <div id="lst"></div>
-            </div>
-
-            <div class="card">
-              <b>Sunucu ayari (server.properties)</b>
-              <input id="pk" placeholder="anahtar (or: motd)"><input id="pv" placeholder="deger">
-              <button onclick="setProp()">Kaydet</button> <small id="pm"></small>
-            </div>
-
-            <div class="card">
-              <b>Gorunum</b><br><small>Logo ve banner sadece bu uygulamada gorunur.</small>
-              <div class="row"><button class="x" onclick="pick('logo')">Logo sec</button><button class="x" onclick="pick('banner')">Banner sec</button></div>
-              <input type="file" id="f" accept="image/*" style="display:none">
-            </div>
-
-            <div class="card"><button class="x" onclick="logout()">Cikis</button></div>
           </div>
 
+          <div id="t1" class="tab">
+            <h3 style="margin:18px 4px 4px">Oyuncular</h3>
+            <div class="card"><b>Cevrimici</b><div id="onl"><small>-</small></div></div>
+            <div class="card">
+              <h3>Bildirimler</h3>
+              <div class="row"><span>Herkes girince bildir</span><label class="sw f"><input type="checkbox" id="na" onchange="sync()"><i></i></label></div>
+              <small>Arkadas listesi (virgulle):</small>
+              <input id="fr" placeholder="Ali, Veli" onchange="sync()">
+            </div>
+            <div class="card">
+              <h3>Listeler</h3>
+              <div class="chips" id="kc"></div>
+              <div class="row"><input id="pn" placeholder="Oyuncu adi"><button class="f" onclick="listAct('add')">Ekle</button></div>
+              <textarea id="bulk" rows="2" placeholder="Toplu ekle: Ali, Veli, Ayse"></textarea>
+              <button class="x" style="width:100%" onclick="bulkAdd()">Toplu ekle</button>
+              <div id="lst"></div>
+            </div>
+            <div class="card"><h3>Giris / cikis gecmisi</h3><div id="hs"><small>-</small></div></div>
+          </div>
+
+          <div id="t2" class="tab">
+            <h3 style="margin:18px 4px 4px">Sunucu ayarlari</h3>
+            <div class="card"><h3>Hazir profil</h3>
+              <div class="chips"><div class="chip" onclick="preset('survival')">Survival</div><div class="chip" onclick="preset('creative')">Yaratici</div><div class="chip" onclick="preset('minigame')">Minigame</div></div>
+            </div>
+            <div class="card"><h3>Hizli ayar</h3>
+              <select id="gm" onchange="setP('gamemode',this.value)"><option value="">Oyun modu</option><option>survival</option><option>creative</option><option>adventure</option></select>
+              <select id="df" onchange="setP('difficulty',this.value)"><option value="">Zorluk</option><option>peaceful</option><option>easy</option><option>normal</option><option>hard</option></select>
+              <select id="ch" onchange="setP('allow-cheats',this.value)"><option value="">Hile (cheats)</option><option value="true">Acik</option><option value="false">Kapali</option></select>
+            </div>
+            <div class="card"><h3>MOTD</h3><input id="motd" placeholder="Sunucu aciklamasi"><button style="width:100%" onclick="setP('motd',$('motd').value)">Kaydet</button></div>
+            <div class="card"><h3>Ozel ayar</h3><input id="pk" placeholder="anahtar (or: max-players)"><input id="pv" placeholder="deger"><button style="width:100%" onclick="setP($('pk').value.trim(),$('pv').value)">Kaydet</button></div>
+          </div>
+
+          <div id="t3" class="tab">
+            <h3 style="margin:18px 4px 4px">Araclar</h3>
+            <div class="card"><h3>Davet karti</h3><div class="inv" id="inv">-</div>
+              <div class="grid"><button onclick="Native.share(inv())">Paylas</button><button class="x" onclick="Native.copy(inv());T('Kopyalandi')">Kopyala</button></div></div>
+            <div class="card"><h3>Seed</h3><input id="seed" placeholder="Dunya seed'i" onchange="S('seed',this.value)"></div>
+            <div class="card"><h3>Koordinat defteri</h3>
+              <div class="row"><input id="cn" placeholder="Ad (Ev)"><input id="cx" placeholder="X Y Z"></div>
+              <button class="x" style="width:100%" onclick="addCo()">Kaydet</button><div id="co"></div></div>
+            <div class="card"><h3>Gorunum</h3><div class="chips" id="th"></div>
+              <div class="grid"><button class="x" onclick="pick('logo')">Logo sec</button><button class="x" onclick="pick('banner')">Kapak sec</button></div>
+              <input type="file" id="f" accept="image/*" style="display:none"></div>
+            <div class="card"><button class="x" style="width:100%" onclick="logout()">Cikis</button></div>
+          </div>
+
+          <nav><div class="on" onclick="go(0)"><b>&#127968;</b>Ana</div><div onclick="go(1)"><b>&#128101;</b>Oyuncu</div><div onclick="go(2)"><b>&#9881;</b>Ayar</div><div onclick="go(3)"><b>&#129520;</b>Arac</div></nav>
+          </div>
+          <div id="toast"></div>
+
           <script>
-          const cb={};let n=0;
+          const cb={};let n=0,ST={},timer=null;
           function py(fn,...a){return new Promise(r=>{const id=''+(++n);cb[id]=r;Native.call(id,fn,JSON.stringify(a.map(String)))})}
           window.onPy=(id,o)=>{cb[id](JSON.parse(o));delete cb[id]};
           const $=i=>document.getElementById(i);
           const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-          let timer=null;
-          const DEF='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108"><rect width="108" height="108" fill="#12151C"/><circle cx="54" cy="54" r="33" fill="none" stroke="#3B82F6" stroke-width="2.5"/><path fill="#5FD068" d="M54,24 L80,39 L54,54 L28,39Z"/><path fill="#8A5A33" d="M28,39 L54,54 L54,84 L28,69Z"/><path fill="#6B4423" d="M80,39 L80,69 L54,84 L54,54Z"/><path fill="#4CB556" d="M28,39 L54,54 L54,61 L28,46Z"/><path fill="#3F9E49" d="M80,39 L80,46 L54,61 L54,54Z"/></svg>');
+          const L=(k,d)=>{try{const v=JSON.parse(localStorage.getItem(k));return v==null?d:v}catch(e){return d}};
+          const S=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
+          const T=m=>{const t=$('toast');t.textContent=m;t.className='show';setTimeout(()=>t.className='',2600)};
+          const DEF='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108"><rect width="108" height="108" fill="#12151C"/><circle cx="54" cy="54" r="33" fill="none" stroke="#3B82F6" stroke-width="2.5"/><path fill="#5FD068" d="M54,24 L80,39 L54,54 L28,39Z"/><path fill="#8A5A33" d="M28,39 L54,54 L54,84 L28,69Z"/><path fill="#6B4423" d="M80,39 L80,69 L54,84 L54,54Z"/></svg>');
+          const COL={Mavi:'#3b82f6',Yesil:'#22c55e',Mor:'#a855f7',Turuncu:'#f97316',Pembe:'#ec4899'};
+          const KINDS={whl:'Whitelist',ops:'Operator',ban:'Banli'};let kind='whl';
 
-          function skin(){
-            const l=localStorage.getItem('logo'),b=localStorage.getItem('banner');
-            $('logo').style.backgroundImage='url("'+(l||DEF)+'")';
-            if(b)$('banner').style.backgroundImage='url('+b+')';
-          }
-          function pick(w){
-            const f=$('f');f.value='';
-            f.onchange=()=>{const r=new FileReader();r.onload=()=>{localStorage.setItem(w,r.result);skin()};if(f.files[0])r.readAsDataURL(f.files[0])};
-            f.click();
-          }
-          function show(p){$('login').style.display=p?'none':'block';$('panel').style.display=p?'block':'none';
-            if(p){skin();$('ka').checked=localStorage.getItem('ka')==='1';refresh();loadList();clearInterval(timer);timer=setInterval(refresh,10000)}}
+          function go(i){document.querySelectorAll('.tab').forEach((e,j)=>e.className='tab'+(i==j?' on':''));
+            document.querySelectorAll('nav div').forEach((e,j)=>e.className=i==j?'on':'');
+            if(i==1){loadList();loadHist()}scrollTo(0,0)}
+          function skin(){const l=localStorage.getItem('logo'),b=localStorage.getItem('banner');
+            $('logo').style.backgroundImage='url("'+(l||DEF)+'")';if(b)$('banner').style.backgroundImage='url('+b+')';
+            document.documentElement.style.setProperty('--a',L('acc','#3b82f6'));
+            $('th').innerHTML=Object.entries(COL).map(([k,v])=>'<div class="chip'+(v==L('acc','#3b82f6')?' on':'')+'" onclick="S(\'acc\',\''+v+'\');skin()">'+k+'</div>').join('')}
+          function pick(w){const f=$('f');f.value='';
+            f.onchange=()=>{const r=new FileReader();r.onload=()=>{localStorage.setItem(w,r.result);skin()};if(f.files[0])r.readAsDataURL(f.files[0])};f.click()}
+          async function show(p){$('login').style.display=p?'none':'block';$('panel').style.display=p?'block':'none';
+            if(p){skin();$('seed').value=L('seed','');drawCo();drawKinds();
+              const c=(await py('cfg_get')).cfg||{};$('ka').checked=!!c.ka;$('sch').value=c.sched||'';$('na').checked=!!c.notifyAll;$('fr').value=(c.friends||[]).join(', ');
+              refresh();clearInterval(timer);timer=setInterval(refresh,10000)}}
           async function boot(){const r=await py('restore');show(r.ok);if(!r.ok&&r.error&&!/No such file|Errno 2/.test(r.error))$('le').textContent=r.error}
-          async function doLogin(){$('le').textContent='Baglaniyor...';
-            const r=await py('login',$('u').value,$('p').value);
-            if(r.ok)show(true);else $('le').textContent=r.error}
-          async function logout(){clearInterval(timer);Native.keepAlive(false);localStorage.setItem('ka','0');await py('logout');show(false)}
-          async function refresh(){
-            const r=await py('state');
-            if(!r.ok){$('msg').textContent=r.error;return}
-            $('nm').textContent=r.name;$('st').textContent=r.status;
-            $('info').textContent=r.players+'/'+r.slots+' oyuncu - '+r.software+' '+r.version+(r.online.length?' - '+r.online.join(', '):'');
-          }
-          async function act(w){$('msg').textContent='...';const r=await py('act',w);$('msg').textContent=r.ok?'Tamam':r.error;refresh()}
-          function toggleKA(){const on=$('ka').checked;localStorage.setItem('ka',on?'1':'0');Native.keepAlive(on)}
+          async function doLogin(){$('le').textContent='Baglaniyor...';const r=await py('login',$('u').value,$('p').value);if(r.ok)show(true);else $('le').textContent=r.error}
+          async function logout(){clearInterval(timer);Native.keepAlive(false);await py('logout');show(false)}
+          async function refresh(){const r=await py('state');
+            if(!r.ok){T(r.error);return}ST=r;
+            const s=r.status.toLowerCase();$('st').textContent=r.status;$('st').className='pill '+(s=='online'?'online':s=='offline'?'offline':'wait');
+            $('nm').textContent=r.name;$('info').textContent=r.players+'/'+r.slots+' oyuncu - '+r.software+' '+r.version;
+            $('onl').innerHTML=r.online.map(x=>'<div class="it"><span><span class="dot" style="background:#4ade80"></span>'+esc(x)+'</span></div>').join('')||'<small>Kimse yok</small>';
+            $('inv').textContent=inv()}
+          function inv(){return '\u{1F3AE} '+(ST.name||'')+'\nAdres: '+(ST.host||'')+'\nPort: '+(ST.port||'')+'\nSurum: '+(ST.software||'')+' '+(ST.version||'')}
+          function cp(){Native.copy(ST.name||'');T('Adres kopyalandi')}
+          function openMc(){Native.mc('Aternos',ST.name||'')}
+          async function act(w){T('...');const r=await py('act',w);T(r.ok?'Tamam':r.error);refresh()}
+          function sync(){const fr=$('fr').value.split(',').map(x=>x.trim()).filter(Boolean);
+            const c={ka:$('ka').checked,sched:$('sch').value,friends:fr,notifyAll:$('na').checked};
+            py('cfg_set',JSON.stringify(c));Native.keepAlive(c.ka||!!c.sched||fr.length>0||c.notifyAll)}
+          function drawKinds(){$('kc').innerHTML=Object.entries(KINDS).map(([k,v])=>'<div class="chip'+(k==kind?' on':'')+'" onclick="kind=\''+k+'\';drawKinds();loadList()">'+v+'</div>').join('')}
           async function loadList(){listAct('')}
-          async function listAct(a,name){
-            const k=$('kind').value;
-            const nm=name!==undefined?name:(a?$('pn').value.trim():'');
-            const r=await py('plist',k,a,nm);
-            if(!r.ok){$('lst').textContent=r.error;return}
-            $('pn').value='';
-            $('lst').innerHTML=r.items.map(x=>'<div class="it"><span>'+esc(x)+'</span><button class="r" data-n="'+esc(x)+'" onclick="listAct(\'remove\',this.dataset.n)">Sil</button></div>').join('')||'<small>Bos</small>';
-          }
-          async function setProp(){const r=await py('prop',$('pk').value.trim(),$('pv').value);$('pm').textContent=r.ok?'Kaydedildi':r.error}
+          async function listAct(a,name){const nm=name!==undefined?name:(a?$('pn').value.trim():'');
+            const r=await py('plist',kind,a,nm);if(!r.ok){$('lst').textContent=r.error;return}$('pn').value='';
+            $('lst').innerHTML=r.items.map(x=>'<div class="it"><span>'+esc(x)+'</span><button class="r s" data-n="'+esc(x)+'" onclick="listAct(\'remove\',this.dataset.n)">Sil</button></div>').join('')||'<small>Bos</small>'}
+          async function bulkAdd(){const ns=$('bulk').value.split(/[,\n]/).map(x=>x.trim()).filter(Boolean);
+            for(const x of ns)await py('plist',kind,'add',x);$('bulk').value='';T(ns.length+' oyuncu eklendi');loadList()}
+          async function loadHist(){const r=await py('hist');if(!r.ok)return;
+            const pt=Object.entries(r.play).sort((a,b)=>b[1]-a[1]).map(([p,s])=>esc(p)+' '+Math.round(s/60)+' dk').join(' \u2022 ');
+            $('hs').innerHTML=(pt?'<small>Toplam sure: '+pt+'</small>':'')+(r.items.map(e=>'<div class="it"><span>'+(e.e=='+'?'\u2795 ':'\u2796 ')+esc(e.p)+'</span><small>'+e.t+'</small></div>').join('')||'<small>Henuz kayit yok</small>')}
+          async function setP(k,v){if(!k||v==='')return;const r=await py('prop',k,v);T(r.ok?k+' kaydedildi':r.error)}
+          const PRE={survival:{gamemode:'survival',difficulty:'normal','allow-cheats':'false'},creative:{gamemode:'creative',difficulty:'peaceful','allow-cheats':'true'},minigame:{gamemode:'adventure',difficulty:'easy','allow-cheats':'true'}};
+          async function preset(k){T('Uygulaniyor...');for(const [a,b] of Object.entries(PRE[k]))await py('prop',a,b);T('Profil uygulandi (yeniden baslat)')}
+          function addCo(){const c=L('co',[]);if(!$('cn').value)return;c.push({n:$('cn').value,x:$('cx').value});S('co',c);$('cn').value=$('cx').value='';drawCo()}
+          function drawCo(){$('co').innerHTML=L('co',[]).map((c,i)=>'<div class="it"><span><b>'+esc(c.n)+'</b> <small>'+esc(c.x)+'</small></span><button class="r s" onclick="delCo('+i+')">Sil</button></div>').join('')}
+          function delCo(i){const c=L('co',[]);c.splice(i,1);S('co',c);drawCo()}
           boot();
           </script></body></html>
           EOF
