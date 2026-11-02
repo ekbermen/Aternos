@@ -87,17 +87,7 @@ jobs:
                   pip {
                       // lxml surumu workflow'da Chaquopy'nin gercekten sundugu wheel'lerden secilir
                       options("--no-deps")
-                      install("requests")
-                      install("urllib3")
-                      install("idna")
-                      install("certifi")
-                      install("charset-normalizer")
-                      install("pyparsing")
-                      install("requests-toolbelt")
-                      install("cloudscraper")
-                      install("websockets")
-                      install("typing-extensions")
-                      install("regex")
+                      // DEPS_PLACEHOLDER
                       // lxml'in native bagimliliklari: --no-deps oldugu icin elle ekleniyor
                       install("chaquopy-libcxx")
                       install("chaquopy-libiconv")
@@ -603,6 +593,42 @@ jobs:
           echo "Secilen lxml: $VER"
           sed -i "s/LXML_VERSION/$VER/" P/app/build.gradle.kts
           grep -n lxml P/app/build.gradle.kts
+
+      - name: Python bagimliliklarini otomatik coz
+        shell: bash
+        run: |
+          # python-aternos'un TUM (dolayli dahil) bagimliliklarini runner'da pip ile cozer,
+          # Chaquopy listesine otomatik ekler. Elle liste tutmaya gerek kalmaz.
+          python -m venv /tmp/v
+          /tmp/v/bin/pip install -q -U pip
+          if /tmp/v/bin/pip install -q --dry-run --ignore-installed --report /tmp/r.json python-aternos; then
+            echo "pip bagimlilik cozumu basarili"
+          else
+            echo "::warning::pip cozumu basarisiz, yedek liste kullaniliyor"
+            echo '{"install":[]}' > /tmp/r.json
+          fi
+          python3 - <<'PY'
+          import json, re
+          FALLBACK = ["requests","urllib3","idna","certifi","charset-normalizer","pyparsing",
+                      "requests-toolbelt","cloudscraper","websockets","typing-extensions",
+                      "regex","js2py","tzlocal","six","pyjsparser"]
+          rep = json.load(open("/tmp/r.json"))
+          found = [i["metadata"]["name"] for i in rep.get("install", [])]
+          norm = lambda n: re.sub(r"[-_.]+", "-", n).lower()
+          skip = {"lxml", "python-aternos"}   # lxml ayri, python-aternos en sonda
+          names = {}
+          for n in FALLBACK + found:          # yedek liste her zaman dahil, tekrarlar elenir
+              if norm(n) not in skip:
+                  names.setdefault(norm(n), n)
+          print("Chaquopy'ye eklenen paketler:", ", ".join(sorted(names)))
+          f = "P/app/build.gradle.kts"
+          t = open(f).read()
+          pat = re.compile(r"^([ \t]*)// DEPS_PLACEHOLDER\n", re.M)
+          assert pat.search(t), "DEPS_PLACEHOLDER bulunamadi"
+          t = pat.sub(lambda m: "".join('%sinstall("%s")\n' % (m.group(1), n) for n in sorted(names.values())), t)
+          open(f, "w").write(t)
+          PY
+          grep -n 'install(' P/app/build.gradle.kts
 
       - name: APK derle
         shell: bash
