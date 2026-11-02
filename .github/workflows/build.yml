@@ -187,12 +187,22 @@ jobs:
                   return d
 
 
+          def _servers():
+              # python-aternos surumleri arasinda list_servers farkli yerde olabiliyor
+              for o in (_at, _g(_at, "account"), _g(_at, "atclient")):
+                  f = _g(o, "list_servers") if o is not None else None
+                  if callable(f):
+                      return f()
+              names = ", ".join(n for n in dir(_at) if not n.startswith("_"))
+              raise RuntimeError("list_servers bulunamadi. Client ozellikleri: " + names)
+
+
           def _s():
               global _at
               _chk()
               if _at is None:
                   _at = Client.restore_session(_dir + "/session")
-              return _at.list_servers()[_idx]
+              return _servers()[_idx]
 
 
           def init(d):
@@ -206,7 +216,7 @@ jobs:
               try:
                   _chk()
                   _at = Client.restore_session(_dir + "/session")
-                  _at.list_servers()
+                  _servers()
                   return _ok()
               except Exception as e:
                   _at = None
