@@ -85,7 +85,7 @@ jobs:
                   version = "3.11"
                   buildPython("python3")
                   pip {
-                      // python-aternos lxml==4.9.2 sabitliyor, Chaquopy'de yok -> bagimliliklari elle veriyoruz
+                      // lxml surumu workflow'da Chaquopy'nin gercekten sundugu wheel'lerden secilir
                       options("--no-deps")
                       install("requests")
                       install("urllib3")
@@ -97,7 +97,7 @@ jobs:
                       install("cloudscraper")
                       install("websockets")
                       install("typing-extensions")
-                      install("lxml==4.9.3")
+                      install("lxml==LXML_VERSION")
                       install("python-aternos")
                   }
               }
@@ -570,6 +570,26 @@ jobs:
           boot();
           </script></body></html>
           EOF
+
+      - name: Chaquopy icin lxml surumunu sec
+        shell: bash
+        run: |
+          IDX=$(curl -fsSL https://chaquo.com/pypi-13.1/lxml/ || true)
+          vers() {
+            echo "$IDX" \
+              | grep -oE "lxml-[0-9]+(\.[0-9]+)*(-[0-9]+)?-cp311-cp311-android_[0-9]+_$1\.whl" \
+              | sed -E 's/^lxml-([0-9]+(\.[0-9]+)*).*/\1/' | sort -Vu
+          }
+          echo "arm64_v8a   : $(vers arm64_v8a | tr '\n' ' ')"
+          echo "armeabi_v7a : $(vers armeabi_v7a | tr '\n' ' ')"
+          VER=$(vers arm64_v8a | grep -Fxf <(vers armeabi_v7a) | sort -V | tail -1 || true)
+          if [ -z "$VER" ]; then
+            echo "::warning::Indeks okunamadi, 4.9.2'ye dusuldu"
+            VER=4.9.2
+          fi
+          echo "Secilen lxml: $VER"
+          sed -i "s/LXML_VERSION/$VER/" P/app/build.gradle.kts
+          grep -n lxml P/app/build.gradle.kts
 
       - name: APK derle
         shell: bash
