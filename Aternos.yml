@@ -1,0 +1,498 @@
+name: Build Aternos Panel APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Proje dosyalarini uret
+        run: |
+          mkdir -p P/app/src/main/{python,assets,java/com/gooo/panel}
+          cd P
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "AternosPanel"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+              id("com.chaquo.python") version "15.0.1" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g
+          android.useAndroidX=true
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("com.chaquo.python")
+          }
+          android {
+              namespace = "com.gooo.panel"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.gooo.panel"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+                  ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          chaquopy {
+              defaultConfig {
+                  version = "3.11"
+                  buildPython("python3")
+                  pip { install("python-aternos") }
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
+              <application android:label="Aternos Panel"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".KeepAlive" android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="server-keepalive"/>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/python/bridge.py <<'EOF'
+          import json
+          from python_aternos import Client, Lists
+
+          _at = None
+          _dir = ""
+          _idx = 0
+
+
+          def _ok(**k):
+              k["ok"] = True
+              return json.dumps(k)
+
+
+          def _err(e):
+              return json.dumps({"ok": False, "error": str(e)})
+
+
+          def _g(o, n, d=None):
+              try:
+                  return getattr(o, n)
+              except Exception:
+                  return d
+
+
+          def _s():
+              global _at
+              if _at is None:
+                  _at = Client.restore_session(_dir + "/session")
+              return _at.list_servers()[_idx]
+
+
+          def init(d):
+              global _dir
+              _dir = d
+              return _ok()
+
+
+          def restore():
+              global _at
+              try:
+                  _at = Client.restore_session(_dir + "/session")
+                  _at.list_servers()
+                  return _ok()
+              except Exception as e:
+                  _at = None
+                  return _err(e)
+
+
+          def login(user, pw):
+              global _at
+              try:
+                  c = Client()
+                  c.login(user, pw)
+                  c.save_session(_dir + "/session")
+                  _at = c
+                  return _ok()
+              except Exception as e:
+                  return _err(e)
+
+
+          def logout():
+              global _at
+              _at = None
+              return _ok()
+
+
+          def state():
+              try:
+                  s = _s()
+                  s.fetch()
+                  return _ok(
+                      name=str(_g(s, "address", "")),
+                      status=str(_g(s, "status", "?")),
+                      players=_g(s, "players_count", 0),
+                      slots=_g(s, "slots", 0),
+                      version=str(_g(s, "version", "")),
+                      software=str(_g(s, "software", "")),
+                      online=[str(p) for p in (_g(s, "players_list", []) or [])],
+                  )
+              except Exception as e:
+                  return _err(e)
+
+
+          def act(what):
+              try:
+                  s = _s()
+                  getattr(s, what)()  # start / stop / restart / confirm
+                  return _ok()
+              except Exception as e:
+                  return _err(e)
+
+
+          def plist(kind, action, name):
+              try:
+                  l = _s().players(getattr(Lists, kind))  # whl / ops / ban
+                  if action == "add" and name:
+                      l.add(name)
+                  elif action == "remove" and name:
+                      l.remove(name)
+                  return _ok(items=[str(p) for p in l.list_players(cache=False)])
+              except Exception as e:
+                  return _err(e)
+
+
+          def prop(key, value):
+              try:
+                  _s().options.set_server_prop(key, value)
+                  return _ok()
+              except Exception as e:
+                  return _err(e)
+
+
+          def tick():
+              # 7/24 modu: sunucu kapaliysa tekrar ac, onay beklerse onayla
+              s = _s()
+              s.fetch()
+              st = str(s.status).lower()
+              try:
+                  if st == "offline":
+                      s.start()
+                  elif "confirm" in st:
+                      s.confirm()
+              except Exception as e:
+                  return st + " (" + str(e)[:40] + ")"
+              return st
+          EOF
+
+          cat > app/src/main/java/com/gooo/panel/MainActivity.kt <<'EOF'
+          package com.gooo.panel
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.webkit.JavascriptInterface
+          import android.webkit.ValueCallback
+          import android.webkit.WebChromeClient
+          import android.webkit.WebView
+          import com.chaquo.python.Python
+          import com.chaquo.python.android.AndroidPlatform
+          import org.json.JSONArray
+          import org.json.JSONObject
+
+          class MainActivity : Activity() {
+              private lateinit var web: WebView
+              private var chooser: ValueCallback<Array<Uri>>? = null
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  if (!Python.isStarted()) Python.start(AndroidPlatform(this))
+                  Python.getInstance().getModule("bridge").callAttr("init", filesDir.absolutePath)
+                  if (Build.VERSION.SDK_INT >= 33)
+                      requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 1)
+                  web = WebView(this)
+                  setContentView(web)
+                  web.settings.javaScriptEnabled = true
+                  web.settings.domStorageEnabled = true
+                  web.addJavascriptInterface(Bridge(), "Native")
+                  web.webChromeClient = object : WebChromeClient() {
+                      override fun onShowFileChooser(
+                          w: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams
+                      ): Boolean {
+                          chooser?.onReceiveValue(null)
+                          chooser = cb
+                          startActivityForResult(p.createIntent(), 7)
+                          return true
+                      }
+                  }
+                  web.loadUrl("file:///android_asset/index.html")
+              }
+
+              override fun onActivityResult(r: Int, c: Int, d: Intent?) {
+                  if (r == 7) {
+                      chooser?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(c, d))
+                      chooser = null
+                  }
+              }
+
+              inner class Bridge {
+                  @JavascriptInterface
+                  fun call(id: String, fn: String, args: String) {
+                      Thread {
+                          val out = try {
+                              val a = JSONArray(args)
+                              val l = Array<Any>(a.length()) { a.getString(it) }
+                              Python.getInstance().getModule("bridge").callAttr(fn, *l).toString()
+                          } catch (e: Exception) {
+                              """{"ok":false,"error":${JSONObject.quote(e.message ?: "hata")}}"""
+                          }
+                          runOnUiThread {
+                              web.evaluateJavascript(
+                                  "window.onPy(${JSONObject.quote(id)},${JSONObject.quote(out)})", null
+                              )
+                          }
+                      }.start()
+                  }
+
+                  @JavascriptInterface
+                  fun keepAlive(on: Boolean) {
+                      val i = Intent(this@MainActivity, KeepAlive::class.java)
+                      if (on) startForegroundService(i) else stopService(i)
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/gooo/panel/KeepAlive.kt <<'EOF'
+          package com.gooo.panel
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.os.Build
+          import android.os.IBinder
+          import com.chaquo.python.Python
+          import com.chaquo.python.android.AndroidPlatform
+
+          class KeepAlive : Service() {
+              @Volatile private var run = false
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              private fun note(t: String): Notification =
+                  Notification.Builder(this, "ka")
+                      .setContentTitle("7/24 modu aktif")
+                      .setContentText(t)
+                      .setSmallIcon(android.R.drawable.ic_popup_sync)
+                      .setOngoing(true)
+                      .build()
+
+              override fun onStartCommand(i: Intent?, f: Int, s: Int): Int {
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(
+                      NotificationChannel("ka", "7/24", NotificationManager.IMPORTANCE_LOW)
+                  )
+                  if (Build.VERSION.SDK_INT >= 34)
+                      startForeground(1, note("basliyor"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                  else startForeground(1, note("basliyor"))
+                  if (!Python.isStarted()) Python.start(AndroidPlatform(this))
+                  val py = Python.getInstance().getModule("bridge")
+                  py.callAttr("init", filesDir.absolutePath)
+                  if (!run) {
+                      run = true
+                      Thread {
+                          while (run) {
+                              val st = try { py.callAttr("tick").toString() }
+                                       catch (e: Exception) { "hata: " + e.message }
+                              nm.notify(1, note(st))
+                              Thread.sleep(30000)
+                          }
+                      }.start()
+                  }
+                  return START_STICKY
+              }
+
+              override fun onDestroy() { run = false }
+          }
+          EOF
+
+          cat > app/src/main/assets/index.html <<'EOF'
+          <!doctype html><html><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <style>
+          body{margin:0;background:#0f1115;color:#e8e8e8;font-family:sans-serif;padding-bottom:40px}
+          .card{background:#1a1d24;margin:10px;padding:14px;border-radius:12px}
+          button{background:#3b82f6;color:#fff;border:0;border-radius:8px;padding:10px 14px;margin:3px}
+          button.r{background:#ef4444}button.g{background:#22c55e}button.x{background:#444}
+          input,select{background:#0f1115;color:#fff;border:1px solid #333;border-radius:8px;padding:9px;width:100%;box-sizing:border-box;margin:4px 0}
+          #banner{height:130px;background:#222 center/cover}
+          #logo{width:64px;height:64px;border-radius:12px;background:#333 center/cover;margin:-32px 14px 0;position:relative;border:3px solid #0f1115}
+          .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+          .it{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #2a2d35}
+          #st{font-size:22px;font-weight:bold}
+          small{color:#999}
+          </style></head><body>
+
+          <div id="login" class="card" style="display:none">
+            <h3>Aternos girisi</h3>
+            <input id="u" placeholder="Kullanici adi"><input id="p" type="password" placeholder="Sifre">
+            <button onclick="doLogin()">Giris</button> <small id="le"></small>
+          </div>
+
+          <div id="panel" style="display:none">
+            <div id="banner"></div><div id="logo"></div>
+            <div class="card">
+              <div id="nm">-</div><div id="st">-</div>
+              <small id="info"></small>
+              <div class="row" style="margin-top:8px">
+                <button class="g" onclick="act('start')">Baslat</button>
+                <button class="r" onclick="act('stop')">Durdur</button>
+                <button onclick="act('restart')">Yeniden</button>
+                <button class="x" onclick="act('confirm')">Onayla</button>
+              </div>
+              <small id="msg"></small>
+            </div>
+
+            <div class="card">
+              <b>7/24 modu</b><br><small>Kapanirsa otomatik tekrar acar (30 sn kontrol).</small>
+              <div class="row"><input type="checkbox" id="ka" style="width:auto" onchange="toggleKA()"> <span>Aktif</span></div>
+            </div>
+
+            <div class="card">
+              <b>Oyuncu listeleri</b>
+              <select id="kind" onchange="loadList()">
+                <option value="whl">Whitelist</option><option value="ops">Operatorler</option><option value="ban">Banlilar</option>
+              </select>
+              <div class="row"><input id="pn" placeholder="Oyuncu adi" style="flex:1"><button onclick="listAct('add')">Ekle</button></div>
+              <div id="lst"></div>
+            </div>
+
+            <div class="card">
+              <b>Sunucu ayari (server.properties)</b>
+              <input id="pk" placeholder="anahtar (or: motd)"><input id="pv" placeholder="deger">
+              <button onclick="setProp()">Kaydet</button> <small id="pm"></small>
+            </div>
+
+            <div class="card">
+              <b>Gorunum</b><br><small>Logo ve banner sadece bu uygulamada gorunur.</small>
+              <div class="row"><button class="x" onclick="pick('logo')">Logo sec</button><button class="x" onclick="pick('banner')">Banner sec</button></div>
+              <input type="file" id="f" accept="image/*" style="display:none">
+            </div>
+
+            <div class="card"><button class="x" onclick="logout()">Cikis</button></div>
+          </div>
+
+          <script>
+          const cb={};let n=0;
+          function py(fn,...a){return new Promise(r=>{const id=''+(++n);cb[id]=r;Native.call(id,fn,JSON.stringify(a.map(String)))})}
+          window.onPy=(id,o)=>{cb[id](JSON.parse(o));delete cb[id]};
+          const $=i=>document.getElementById(i);
+          const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+          let timer=null;
+
+          function skin(){
+            const l=localStorage.getItem('logo'),b=localStorage.getItem('banner');
+            if(l)$('logo').style.backgroundImage='url('+l+')';
+            if(b)$('banner').style.backgroundImage='url('+b+')';
+          }
+          function pick(w){
+            const f=$('f');f.value='';
+            f.onchange=()=>{const r=new FileReader();r.onload=()=>{localStorage.setItem(w,r.result);skin()};if(f.files[0])r.readAsDataURL(f.files[0])};
+            f.click();
+          }
+          function show(p){$('login').style.display=p?'none':'block';$('panel').style.display=p?'block':'none';
+            if(p){skin();$('ka').checked=localStorage.getItem('ka')==='1';refresh();loadList();clearInterval(timer);timer=setInterval(refresh,10000)}}
+          async function boot(){const r=await py('restore');show(r.ok)}
+          async function doLogin(){$('le').textContent='Baglaniyor...';
+            const r=await py('login',$('u').value,$('p').value);
+            if(r.ok)show(true);else $('le').textContent=r.error}
+          async function logout(){clearInterval(timer);Native.keepAlive(false);localStorage.setItem('ka','0');await py('logout');show(false)}
+          async function refresh(){
+            const r=await py('state');
+            if(!r.ok){$('msg').textContent=r.error;return}
+            $('nm').textContent=r.name;$('st').textContent=r.status;
+            $('info').textContent=r.players+'/'+r.slots+' oyuncu - '+r.software+' '+r.version+(r.online.length?' - '+r.online.join(', '):'');
+          }
+          async function act(w){$('msg').textContent='...';const r=await py('act',w);$('msg').textContent=r.ok?'Tamam':r.error;refresh()}
+          function toggleKA(){const on=$('ka').checked;localStorage.setItem('ka',on?'1':'0');Native.keepAlive(on)}
+          async function loadList(){listAct('')}
+          async function listAct(a,name){
+            const k=$('kind').value;
+            const nm=name!==undefined?name:(a?$('pn').value.trim():'');
+            const r=await py('plist',k,a,nm);
+            if(!r.ok){$('lst').textContent=r.error;return}
+            $('pn').value='';
+            $('lst').innerHTML=r.items.map(x=>'<div class="it"><span>'+esc(x)+'</span><button class="r" data-n="'+esc(x)+'" onclick="listAct(\'remove\',this.dataset.n)">Sil</button></div>').join('')||'<small>Bos</small>';
+          }
+          async function setProp(){const r=await py('prop',$('pk').value.trim(),$('pv').value);$('pm').textContent=r.ok?'Kaydedildi':r.error}
+          boot();
+          </script></body></html>
+          EOF
+
+      - name: APK derle
+        run: |
+          cd P
+          gradle assembleDebug --no-daemon --stacktrace
+
+      - name: APK yukle
+        uses: actions/upload-artifact@v4
+        with:
+          name: AternosPanel-apk
+          path: P/app/build/outputs/apk/debug/*.apk
