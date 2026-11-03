@@ -30,7 +30,7 @@ jobs:
 
       - name: Proje dosyalarini uret
         run: |
-          mkdir -p P/app/src/main/{python,assets,java/com/gooo/panel,res/drawable,res/mipmap-anydpi-v26}
+          mkdir -p P/app/src/main/{python,assets,java/com/gooo/panel,res/drawable,res/layout,res/xml,res/mipmap-anydpi-v26}
           cd P
 
           cat > settings.gradle.kts <<'EOF'
@@ -118,7 +118,11 @@ jobs:
                       <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                           android:value="server-keepalive"/>
                   </service>
-              </application>
+              <receiver android:name=".PanelWidget" android:exported="false">
+              <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE"/></intent-filter>
+              <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_info"/>
+          </receiver>
+          </application>
           </manifest>
           EOF
 
@@ -150,6 +154,111 @@ jobs:
               <foreground android:drawable="@drawable/ic_launcher_fg"/>
           </adaptive-icon>
           EOF
+          cat > app/src/main/res/drawable/widget_bg.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android">
+              <solid android:color="#151921"/>
+              <corners android:radius="22dp"/>
+          </shape>
+          EOF
+          cat > app/src/main/res/xml/widget_info.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="250dp" android:minHeight="110dp"
+              android:updatePeriodMillis="0"
+              android:initialLayout="@layout/widget"
+              android:resizeMode="horizontal|vertical"
+              android:widgetCategory="home_screen"/>
+          EOF
+          cat > app/src/main/res/layout/widget.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/w_root"
+              android:layout_width="match_parent" android:layout_height="match_parent"
+              android:orientation="vertical" android:padding="12dp"
+              android:background="@drawable/widget_bg">
+              <TextView android:id="@+id/w_name" android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:textColor="#EEF1F6" android:textSize="14sp" android:maxLines="1"/>
+              <TextView android:id="@+id/w_st" android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:text="?" android:textColor="#FBBF24" android:textSize="20sp" android:textStyle="bold"/>
+              <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:orientation="horizontal" android:layout_marginTop="6dp">
+                  <Button android:id="@+id/w_start" android:layout_width="0dp" android:layout_height="wrap_content"
+                      android:layout_weight="1" android:text="Baslat"/>
+                  <Button android:id="@+id/w_stop" android:layout_width="0dp" android:layout_height="wrap_content"
+                      android:layout_weight="1" android:text="Durdur"/>
+              </LinearLayout>
+          </LinearLayout>
+          EOF
+          cat > app/src/main/java/com/gooo/panel/Widget.kt <<'EOF'
+          package com.gooo.panel
+
+          import android.app.PendingIntent
+          import android.appwidget.AppWidgetManager
+          import android.appwidget.AppWidgetProvider
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.widget.RemoteViews
+          import com.chaquo.python.Python
+          import com.chaquo.python.android.AndroidPlatform
+          import java.io.File
+
+          class PanelWidget : AppWidgetProvider() {
+              override fun onUpdate(c: Context, m: AppWidgetManager, ids: IntArray) {
+                  for (id in ids) m.updateAppWidget(id, views(c))
+              }
+
+              override fun onReceive(c: Context, i: Intent) {
+                  super.onReceive(c, i)
+                  val what = when (i.action) { ACT_START -> "start"; ACT_STOP -> "stop"; else -> return }
+                  val pr = goAsync()
+                  Thread {
+                      try {
+                          if (!Python.isStarted()) Python.start(AndroidPlatform(c))
+                          val py = Python.getInstance().getModule("bridge")
+                          py.callAttr("init", c.filesDir.absolutePath)
+                          py.callAttr("act", what)
+                          py.callAttr("state")
+                      } catch (e: Exception) { }
+                      refresh(c)
+                      pr.finish()
+                  }.start()
+              }
+
+              companion object {
+                  const val ACT_START = "com.gooo.panel.START"
+                  const val ACT_STOP = "com.gooo.panel.STOP"
+
+                  private fun pi(c: Context, a: String, rc: Int) = PendingIntent.getBroadcast(
+                      c, rc, Intent(c, PanelWidget::class.java).setAction(a),
+                      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                  )
+
+                  fun views(c: Context): RemoteViews {
+                      val l = try { File(c.filesDir, "last.txt").readLines() } catch (e: Exception) { emptyList() }
+                      val st = l.getOrNull(0) ?: "?"
+                      val v = RemoteViews(c.packageName, R.layout.widget)
+                      v.setTextViewText(R.id.w_name, l.getOrNull(2) ?: "Aternos Panel")
+                      v.setTextViewText(R.id.w_st, st.uppercase() + "  " + (l.getOrNull(1) ?: ""))
+                      v.setTextColor(R.id.w_st, when (st) {
+                          "online" -> 0xFF4ADE80.toInt(); "offline" -> 0xFFF87171.toInt(); else -> 0xFFFBBF24.toInt()
+                      })
+                      v.setOnClickPendingIntent(R.id.w_start, pi(c, ACT_START, 1))
+                      v.setOnClickPendingIntent(R.id.w_stop, pi(c, ACT_STOP, 2))
+                      v.setOnClickPendingIntent(R.id.w_root, PendingIntent.getActivity(
+                          c, 3, Intent(c, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
+                      return v
+                  }
+
+                  fun refresh(c: Context) {
+                      val m = AppWidgetManager.getInstance(c)
+                      for (id in m.getAppWidgetIds(ComponentName(c, PanelWidget::class.java)))
+                          m.updateAppWidget(id, views(c))
+                  }
+              }
+          }
+          EOF
 
           cat > app/src/main/python/bridge.py <<'EOF'
           import json, os, time, datetime
@@ -163,13 +272,49 @@ jobs:
               _imp_err = "python-aternos yuklenemedi: " + repr(e)
 
 
+          import socket
+          import urllib.request
+
+          _orig_gai = socket.getaddrinfo
+          _dns_cache = {}
+
+
+          def _doh(host):
+              # Telefonun DNS'i calismazsa IP'ye dogrudan baglanip Cloudflare/Google DoH ile cozer
+              for u in ("https://1.1.1.1/dns-query?name=%s&type=A", "https://8.8.8.8/resolve?name=%s&type=A"):
+                  try:
+                      r = urllib.request.Request(u % host, headers={"accept": "application/dns-json"})
+                      d = json.load(urllib.request.urlopen(r, timeout=6))
+                      a = [x["data"] for x in d.get("Answer", []) if x.get("type") == 1]
+                      if a:
+                          return a
+                  except Exception:
+                      pass
+              return []
+
+
+          def _gai(host, *a, **k):
+              try:
+                  return _orig_gai(host, *a, **k)
+              except socket.gaierror:
+                  if not isinstance(host, str) or host.replace(".", "").isdigit():
+                      raise
+                  ips = _dns_cache.get(host) or _doh(host)
+                  if not ips:
+                      raise
+                  _dns_cache[host] = ips
+                  return _orig_gai(ips[0], *a, **k)
+
+
+          socket.getaddrinfo = _gai
+
+
           def _chk():
               if _imp_err:
                   raise RuntimeError(_imp_err)
 
           _at = None
           _dir = ""
-          _idx = 0
 
 
           def _isnet(e):
@@ -212,14 +357,43 @@ jobs:
                       time.sleep(2 * (i + 1))
 
 
+          def _srvs():
+              # python-aternos 1.x/2.x: client.list_servers(); 3.x: client.account.list_servers()
+              f = getattr(_at, "list_servers", None)
+              if f is None:
+                  f = _at.account.list_servers
+              return f()
+
+
           def _s():
               def go():
                   global _at
                   _chk()
                   if _at is None:
-                      _at = Client.restore_session(_dir + "/session")
-                  return _at.list_servers()[_idx]
+                      _at = Client.restore_session(_sess())
+                  l = _srvs()
+                  if not l:
+                      raise RuntimeError("Bu hesapta sunucu bulunamadi")
+                  i = _jl("srv.json", {}).get("i", 0)
+                  return l[i if i < len(l) else 0]
               return _retry(go)
+
+
+          def _acc():
+              return _jl("acc.json", {"active": "", "list": []})
+
+
+          def _sess():
+              n = _acc().get("active")
+              return _dir + "/session_" + n if n else _dir + "/session"
+
+
+          def _reset():
+              for f in ("online.json", "last.txt"):
+                  try:
+                      os.remove(_dir + "/" + f)
+                  except Exception:
+                      pass
 
 
           def _jl(n, d):
@@ -245,8 +419,8 @@ jobs:
               global _at
               try:
                   _chk()
-                  _at = Client.restore_session(_dir + "/session")
-                  _retry(lambda: _at.list_servers())
+                  _at = Client.restore_session(_sess())
+                  _retry(lambda: _srvs())
                   return _ok()
               except Exception as e:
                   _at = None
@@ -259,7 +433,18 @@ jobs:
                   _chk()
                   c = Client()
                   _retry(lambda: c.login(user, pw))
-                  c.save_session(_dir + "/session")
+                  n = "".join(ch for ch in user if ch.isalnum() or ch in "-_.") or "hesap"
+                  a = _acc()
+                  if not a["list"] and os.path.exists(_dir + "/session"):
+                      os.rename(_dir + "/session", _dir + "/session_eski-hesap")
+                      a["list"].append("eski-hesap")
+                  c.save_session(_dir + "/session_" + n)
+                  if n not in a["list"]:
+                      a["list"].append(n)
+                  a["active"] = n
+                  _js("acc.json", a)
+                  _js("srv.json", {"i": 0})
+                  _reset()
                   _at = c
                   return _ok()
               except Exception as e:
@@ -268,8 +453,69 @@ jobs:
 
           def logout():
               global _at
+              a = _acc()
+              n = a.get("active")
+              try:
+                  os.remove(_dir + ("/session_" + n if n else "/session"))
+              except Exception:
+                  pass
+              if n:
+                  a["list"] = [x for x in a["list"] if x != n]
+                  a["active"] = a["list"][0] if a["list"] else ""
+                  _js("acc.json", a)
               _at = None
+              _js("srv.json", {"i": 0})
+              _reset()
               return _ok()
+
+
+          def accounts():
+              a = _acc()
+              return _ok(list=a.get("list", []), active=a.get("active", ""))
+
+
+          def switch(n):
+              global _at
+              a = _acc()
+              if n not in a["list"]:
+                  return _err(RuntimeError("Hesap bulunamadi"))
+              a["active"] = n
+              _js("acc.json", a)
+              _js("srv.json", {"i": 0})
+              _reset()
+              _at = None
+              return restore()
+
+
+          def servers():
+              try:
+                  _s()
+                  l = _srvs()
+                  return _ok(items=[str(_g(x, "address", "sunucu")) for x in l], cur=_jl("srv.json", {}).get("i", 0))
+              except Exception as e:
+                  return _err(e)
+
+
+          def pick(i):
+              _js("srv.json", {"i": int(i)})
+              _reset()
+              return _ok()
+
+
+          def _last(s, st):
+              try:
+                  with open(_dir + "/last.txt", "w") as f:
+                      f.write("\n".join([st, "%s/%s" % (_g(s, "players_count", 0), _g(s, "slots", 0)), str(_g(s, "address", ""))]))
+              except Exception:
+                  pass
+
+
+          def _prev_status():
+              try:
+                  with open(_dir + "/last.txt") as f:
+                      return f.readline().strip()
+              except Exception:
+                  return ""
 
 
           def _track(s):
@@ -299,6 +545,7 @@ jobs:
                   s = _s()
                   _retry(s.fetch)
                   cur, _a = _track(s)
+                  _last(s, str(_g(s, "status", "?")).lower())
                   return _ok(
                       name=str(_g(s, "address", "")),
                       host=str(_g(s, "domain", "")),
@@ -395,9 +642,77 @@ jobs:
                   except Exception as e:
                       st = st + " (" + _nice(e)[:40] + ")"
                   _cur, alert = _track(s)
-                  return st + "|" + ", ".join(alert)
+                  msgs = [p + " girdi" for p in alert]
+                  pv = _prev_status()
+                  if pv and pv != st.split(" ")[0] and st.split(" ")[0] in ("online", "offline"):
+                      msgs.append("Sunucu " + st.split(" ")[0])
+                  _last(s, st.split(" ")[0])
+                  return st + "|" + ", ".join(msgs)
               except Exception as e:
                   return "hata: " + _nice(e) + "|"
+
+
+          def _run(cmd, secs):
+              # websocket konsolu: komut gonderir, birkac saniye log toplar (sunucu online olmali)
+              import asyncio
+              from python_aternos.atwss import Streams
+              lines = []
+
+              async def go():
+                  w = _s().wss()
+
+                  @w.wssreceiver(Streams.console)
+                  async def _l(msg):
+                      lines.append(str(msg).replace("\r", "")[:300])
+
+                  t = asyncio.create_task(w.connect())
+                  for _ in range(60):
+                      if getattr(w, "socket", None) is not None:
+                          break
+                      await asyncio.sleep(0.1)
+                  await asyncio.sleep(0.7)
+                  if cmd:
+                      await w.command(cmd)
+                  await asyncio.sleep(secs)
+                  try:
+                      await w.close()
+                  except Exception:
+                      pass
+                  t.cancel()
+
+              asyncio.run(go())
+              return lines
+
+
+          def cmd(c):
+              try:
+                  _chk()
+                  return _ok(lines=_run(c, 3)[-40:])
+              except Exception as e:
+                  return _err(e)
+
+
+          def packs():
+              # kurulu addon paketlerini listeler (Bedrock: behavior_packs / resource_packs)
+              try:
+                  fm = _s().files()
+                  out = []
+                  for d in ("/behavior_packs", "/resource_packs"):
+                      try:
+                          out += [{"d": d[1:], "n": f.name, "p": f.path} for f in fm.list_dir(d)]
+                      except Exception:
+                          pass
+                  return _ok(items=out)
+              except Exception as e:
+                  return _err(e)
+
+
+          def delpack(path):
+              try:
+                  _s().files().get_file(path).delete()
+                  return _ok()
+              except Exception as e:
+                  return _err(e)
           EOF
 
           cat > app/src/main/java/com/gooo/panel/MainActivity.kt <<'EOF'
@@ -491,6 +806,48 @@ jobs:
                       }.start()
                   }
 
+                  private fun js(s: String) = runOnUiThread { web.evaluateJavascript(s, null) }
+
+                  @android.annotation.SuppressLint("NewApi")
+                  @Suppress("DEPRECATION")
+                  @JavascriptInterface
+                  fun bioOk(): Boolean {
+                      if (Build.VERSION.SDK_INT < 29) return false
+                      val m = getSystemService(android.hardware.biometrics.BiometricManager::class.java) ?: return false
+                      val r = if (Build.VERSION.SDK_INT >= 30)
+                          m.canAuthenticate(android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                      else m.canAuthenticate()
+                      return r == android.hardware.biometrics.BiometricManager.BIOMETRIC_SUCCESS
+                  }
+
+                  @android.annotation.SuppressLint("NewApi")
+                  @JavascriptInterface
+                  fun bio(title: String) = runOnUiThread {
+                      if (Build.VERSION.SDK_INT < 29) { js("onBio(false)"); return@runOnUiThread }
+                      try {
+                          val ex = mainExecutor
+                          val p = android.hardware.biometrics.BiometricPrompt.Builder(this@MainActivity)
+                              .setTitle(title)
+                              .setNegativeButton("Iptal", ex) { _, _ -> js("onBio(false)") }
+                              .build()
+                          p.authenticate(android.os.CancellationSignal(), ex,
+                              object : android.hardware.biometrics.BiometricPrompt.AuthenticationCallback() {
+                                  override fun onAuthenticationSucceeded(r: android.hardware.biometrics.BiometricPrompt.AuthenticationResult?) {
+                                      js("onBio(true)")
+                                  }
+                                  override fun onAuthenticationError(c: Int, s: CharSequence?) { js("onBio(false)") }
+                              })
+                      } catch (e: Exception) { js("onBio(false)") }
+                  }
+
+                  @JavascriptInterface
+                  fun url(u: String) = runOnUiThread {
+                      try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u))) } catch (e: Exception) { }
+                  }
+
+                  @JavascriptInterface
+                  fun widget() { PanelWidget.refresh(this@MainActivity) }
+
                   @JavascriptInterface
                   fun copy(t: String) = runOnUiThread {
                       (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager)
@@ -559,7 +916,7 @@ jobs:
 
               private fun alert(t: String): Notification =
                   Notification.Builder(this, "al")
-                      .setContentTitle("Oyuncu girdi")
+                      .setContentTitle("Panel bildirimi")
                       .setContentText(t)
                       .setSmallIcon(android.R.drawable.ic_dialog_info)
                       .setAutoCancel(true)
@@ -589,9 +946,10 @@ jobs:
                               val p = out.split("|", limit = 2)
                               if (p[0].startsWith("hata")) fail++ else fail = 0
                               nm.notify(1, note(p[0]))
+                              PanelWidget.refresh(this@KeepAlive)
                               if (p.size > 1 && p[1].isNotBlank()) nm.notify(2, alert(p[1]))
-                              // hata olursa bekleme suresi 30 -> 60 -> 120 -> 240 sn (internet gelince normale doner)
-                              try { Thread.sleep(minOf(30000L shl minOf(fail, 3), 240000L)) } catch (e: InterruptedException) { }
+                              // Aternos sik istegi bot sayip hesabi askiya alabilir: normal 60 sn, hatada 120/240/480 sn (internet gelince normale doner)
+                              try { Thread.sleep(minOf(60000L shl minOf(fail, 3), 480000L)) } catch (e: InterruptedException) { }
                           }
                       }.start()
                   }
@@ -637,6 +995,7 @@ jobs:
           nav div{flex:1;text-align:center;font-size:11px;color:var(--m);padding:4px}nav div b{display:block;font-size:22px;font-weight:400}nav .on{color:var(--a)}
           #toast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%);background:#000d;padding:11px 18px;border-radius:99px;font-size:14px;opacity:0;pointer-events:none;transition:.25s;max-width:90%;text-align:center}#toast.show{opacity:1}
           .inv{background:linear-gradient(135deg,var(--a),#1d222d);border-radius:18px;padding:18px;white-space:pre-line;font-weight:600;line-height:1.6}
+          #lock{position:fixed;inset:0;z-index:99;background:var(--bg);display:none;flex-direction:column;align-items:center;justify-content:center;gap:10px}
           .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px}
           </style></head><body>
 
@@ -644,12 +1003,14 @@ jobs:
             <h3>Aternos girisi</h3>
             <input id="u" placeholder="Kullanici adi"><input id="p" type="password" placeholder="Sifre">
             <button style="width:100%;margin-top:8px" onclick="doLogin()">Giris</button><small id="le"></small>
+            <button class="x" id="cl" style="display:none;width:100%;margin-top:8px" onclick="show(true)">Vazgec</button>
           </div>
 
           <div id="panel" style="display:none">
           <div id="t0" class="tab on">
             <div id="banner"></div><div id="logo"></div>
             <div class="card">
+              <select id="sv" style="display:none" onchange="pickSrv(this.value)"></select>
               <span id="st" class="pill">-</span>
               <div class="addr" id="nm">-</div><small id="info"></small>
               <div class="grid">
@@ -690,6 +1051,15 @@ jobs:
           </div>
 
           <div id="t2" class="tab">
+            <h3 style="margin:18px 4px 4px">Konsol</h3>
+            <div class="card"><pre id="cons" style="margin:0 0 8px;white-space:pre-wrap;font-size:12px;max-height:200px;overflow:auto;color:#9be3a8">Sunucu online iken komut gonder.</pre>
+              <div class="row"><input id="cm" placeholder="komut (or: list)"><button class="f" onclick="runCmd($('cm').value)">Gonder</button></div>
+              <div class="chips" id="qc"></div></div>
+            <div class="card"><h3>Duyuru sablonlari</h3><div class="chips" id="sy"></div>
+              <input id="sm" placeholder="Ozel duyuru"><button style="width:100%" onclick="runCmd('say '+$('sm').value)">Duyur</button></div>
+          </div>
+
+          <div id="t3" class="tab">
             <h3 style="margin:18px 4px 4px">Sunucu ayarlari</h3>
             <div class="card"><h3>Hazir profil</h3>
               <div class="chips"><div class="chip" onclick="preset('survival')">Survival</div><div class="chip" onclick="preset('creative')">Yaratici</div><div class="chip" onclick="preset('minigame')">Minigame</div></div>
@@ -703,7 +1073,7 @@ jobs:
             <div class="card"><h3>Ozel ayar</h3><input id="pk" placeholder="anahtar (or: max-players)"><input id="pv" placeholder="deger"><button style="width:100%" onclick="setP($('pk').value.trim(),$('pv').value)">Kaydet</button></div>
           </div>
 
-          <div id="t3" class="tab">
+          <div id="t4" class="tab">
             <h3 style="margin:18px 4px 4px">Araclar</h3>
             <div class="card"><h3>Davet karti</h3><div class="inv" id="inv">-</div>
               <div class="grid"><button onclick="Native.share(inv())">Paylas</button><button class="x" onclick="Native.copy(inv());T('Kopyalandi')">Kopyala</button></div></div>
@@ -714,11 +1084,21 @@ jobs:
             <div class="card"><h3>Gorunum</h3><div class="chips" id="th"></div>
               <div class="grid"><button class="x" onclick="pick('logo')">Logo sec</button><button class="x" onclick="pick('banner')">Kapak sec</button></div>
               <input type="file" id="f" accept="image/*" style="display:none"></div>
+            <div class="card"><h3>Addon / paketler</h3>
+              <small>Dosya yukleme Aternos sitesinden yapilir (kutuphane ikili dosya yuklemeyi desteklemiyor). Kurulu paketleri burada gorup silebilirsin.</small>
+              <div class="grid"><button class="x" onclick="Native.url('https://aternos.org/files/')">Dosyalar (site)</button><button class="x" onclick="Native.url('https://mcpedl.com/')">Addon bul</button></div>
+              <button class="x" style="width:100%;margin-top:8px" onclick="loadPacks()">Kurulu paketleri listele</button><div id="pk2"></div></div>
+            <div class="card"><h3>Hesaplar</h3><div id="ac"></div>
+              <button class="x" style="width:100%;margin-top:8px" onclick="addAcct()">+ Hesap ekle</button></div>
+            <div class="card"><h3>Uygulama kilidi</h3><div class="chips" id="lm"></div>
+              <small id="lmh"></small>
+              <input id="pn2" type="password" inputmode="numeric" placeholder="PIN (bos = PIN'i kaldir)"><button class="x" style="width:100%" onclick="setPin()">PIN'i kaydet</button></div>
             <div class="card"><button class="x" style="width:100%" onclick="logout()">Cikis</button></div>
           </div>
 
-          <nav><div class="on" onclick="go(0)"><b>&#127968;</b>Ana</div><div onclick="go(1)"><b>&#128101;</b>Oyuncu</div><div onclick="go(2)"><b>&#9881;</b>Ayar</div><div onclick="go(3)"><b>&#129520;</b>Arac</div></nav>
+          <nav><div class="on" onclick="go(0)"><b>&#127968;</b>Ana</div><div onclick="go(1)"><b>&#128101;</b>Oyuncu</div><div onclick="go(2)"><b>&#128187;</b>Konsol</div><div onclick="go(3)"><b>&#9881;</b>Ayar</div><div onclick="go(4)"><b>&#129520;</b>Arac</div></nav>
           </div>
+          <div id="lock"><h3 id="lt">Panel kilitli</h3><input id="pi" type="password" inputmode="numeric" placeholder="PIN" style="max-width:220px;text-align:center"><button id="lo" onclick="unlock()">Ac</button><button id="lb" class="x" onclick="Native.bio('Panel kilidi')">&#128274; Parmak izi</button></div>
           <div id="toast"></div>
 
           <script>
@@ -743,19 +1123,19 @@ jobs:
             $('th').innerHTML=Object.entries(COL).map(([k,v])=>'<div class="chip'+(v==L('acc','#3b82f6')?' on':'')+'" onclick="S(\'acc\',\''+v+'\');skin()">'+k+'</div>').join('')}
           function pick(w){const f=$('f');f.value='';
             f.onchange=()=>{const r=new FileReader();r.onload=()=>{localStorage.setItem(w,r.result);skin()};if(f.files[0])r.readAsDataURL(f.files[0])};f.click()}
-          async function show(p){$('login').style.display=p?'none':'block';$('panel').style.display=p?'block':'none';
-            if(p){skin();$('seed').value=L('seed','');drawCo();drawKinds();
+          async function show(p){if(!p)$('cl').style.display='none';$('login').style.display=p?'none':'block';$('panel').style.display=p?'block':'none';
+            if(p){skin();$('qc').innerHTML=QC.map(c=>'<div class="chip" onclick="runCmd(\''+c+'\')">'+c+'</div>').join('');$('sy').innerHTML=SAY.map((c,i)=>'<div class="chip" onclick="runCmd(\'say '+c+'\')">'+c+'</div>').join('');$('seed').value=L('seed','');drawLM();drawCo();drawKinds();
               const c=(await py('cfg_get')).cfg||{};$('ka').checked=!!c.ka;$('sch').value=c.sched||'';$('na').checked=!!c.notifyAll;$('fr').value=(c.friends||[]).join(', ');
-              refresh();clearInterval(timer);timer=setInterval(refresh,10000)}}
+              loadServers();loadAccts();refresh();clearInterval(timer);timer=setInterval(()=>{if(!document.hidden)refresh()},30000)}}
           async function boot(){const r=await py('restore');show(r.ok);if(!r.ok&&r.error&&!/No such file|Errno 2/.test(r.error))$('le').textContent=r.error}
           async function doLogin(){$('le').textContent='Baglaniyor...';const r=await py('login',$('u').value,$('p').value);if(r.ok)show(true);else $('le').textContent=r.error}
-          async function logout(){clearInterval(timer);Native.keepAlive(false);await py('logout');show(false)}
+          async function logout(){clearInterval(timer);Native.keepAlive(false);await py('logout');boot()}
           async function refresh(){const r=await py('state');
-            if(!r.ok){T(r.error);return}ST=r;
+            if(!r.ok){T(r.error);$('info').textContent=r.error;return}ST=r;
             const s=r.status.toLowerCase();$('st').textContent=r.status;$('st').className='pill '+(s=='online'?'online':s=='offline'?'offline':'wait');
             $('nm').textContent=r.name;$('info').textContent=r.players+'/'+r.slots+' oyuncu - '+r.software+' '+r.version;
             $('onl').innerHTML=r.online.map(x=>'<div class="it"><span><span class="dot" style="background:#4ade80"></span>'+esc(x)+'</span></div>').join('')||'<small>Kimse yok</small>';
-            $('inv').textContent=inv()}
+            $('inv').textContent=inv();try{Native.widget()}catch(e){}}
           function inv(){return '\u{1F3AE} '+(ST.name||'')+'\nAdres: '+(ST.host||'')+'\nPort: '+(ST.port||'')+'\nSurum: '+(ST.software||'')+' '+(ST.version||'')}
           function cp(){Native.copy(ST.name||'');T('Adres kopyalandi')}
           function openMc(){Native.mc('Aternos',ST.name||'')}
@@ -779,6 +1159,44 @@ jobs:
           function addCo(){const c=L('co',[]);if(!$('cn').value)return;c.push({n:$('cn').value,x:$('cx').value});S('co',c);$('cn').value=$('cx').value='';drawCo()}
           function drawCo(){$('co').innerHTML=L('co',[]).map((c,i)=>'<div class="it"><span><b>'+esc(c.n)+'</b> <small>'+esc(c.x)+'</small></span><button class="r s" onclick="delCo('+i+')">Sil</button></div>').join('')}
           function delCo(i){const c=L('co',[]);c.splice(i,1);S('co',c);drawCo()}
+          async function loadServers(){const r=await py('servers');const s=$('sv');
+            if(!r.ok||r.items.length<2){s.style.display='none';return}
+            s.innerHTML=r.items.map((x,i)=>'<option value="'+i+'"'+(i==r.cur?' selected':'')+'>'+esc(x)+'</option>').join('');s.style.display='block'}
+          async function pickSrv(i){await py('pick',i);$('st').textContent='...';refresh();loadHist();loadList()}
+          async function loadAccts(){const r=await py('accounts');if(!r.ok)return;
+            $('ac').innerHTML=r.list.map(x=>'<div class="it"><span>'+esc(x)+(x==r.active?' <small>(aktif)</small>':'')+'</span>'+(x==r.active?'':'<button class="s" data-n="'+esc(x)+'" onclick="switchAcct(this.dataset.n)">Gec</button>')+'</div>').join('')||'<small>Kayitli hesap yok</small>'}
+          async function switchAcct(n){T('Hesap degisiyor...');const r=await py('switch',n);if(r.ok)show(true);else T(r.error)}
+          function addAcct(){clearInterval(timer);$('u').value=$('p').value='';$('le').textContent='';$('cl').style.display='block';$('login').style.display='block';$('panel').style.display='none'}
+          const QC=['list','time set day','time set night','weather clear'];
+          const SAY=['Hos geldiniz!','Sunucu 5 dk sonra yeniden baslayacak','Etkinlik basliyor, spawn noktasina gelin!','Lutfen hile kullanmayin'];
+          async function runCmd(c){c=c.trim();if(!c)return;$('cons').textContent='Gonderiliyor...';go(2);const r=await py('cmd',c);$('cons').textContent=r.ok?(r.lines.join('\n')||'Gonderildi (cikti yok)'):r.error}
+          async function loadPacks(){$('pk2').innerHTML='<small>Yukleniyor...</small>';const r=await py('packs');if(!r.ok){$('pk2').textContent=r.error;return}
+            $('pk2').innerHTML=r.items.map(x=>'<div class="it"><span>'+esc(x.n)+' <small>'+esc(x.d)+'</small></span><button class="r s" data-p="'+esc(x.p)+'" onclick="delPack(this)">Sil</button></div>').join('')||'<small>Paket yok</small>'}
+          async function delPack(b){if(!b.dataset.s){b.dataset.s=1;b.textContent='Emin misin?';setTimeout(()=>{b.dataset.s='';b.textContent='Sil'},3000);return}
+            const r=await py('delpack',b.dataset.p);T(r.ok?'Silindi':r.error);loadPacks()}
+          const LM={off:'Kapali',pin:'PIN',bio:'Parmak izi',either:'Parmak izi veya PIN',both:'Parmak izi + PIN'};
+          const lm=()=>L('lm',L('pin','')?'pin':'off');let pend=null,stage=0,hid=0;
+          function drawLM(){$('lm').innerHTML=Object.entries(LM).map(([k,v])=>'<div class="chip'+(k==lm()?' on':'')+'" onclick="setLM(\''+k+'\')">'+v+'</div>').join('');
+            $('lmh').textContent=Native.bioOk()?'':'Bu telefonda kayitli parmak izi yok veya desteklenmiyor.'}
+          function setPin(){const v=$('pn2').value.trim();S('pin',v?btoa(v):'');$('pn2').value='';
+            if(!v&&['pin','either','both'].includes(lm()))S('lm','off');T(v?'PIN ayarlandi':'PIN kaldirildi');drawLM()}
+          function setLM(m){const v=$('pn2').value.trim();if(v)setPin();
+            if(['pin','either','both'].includes(m)&&!L('pin','')){T('Once PIN yaz ve kaydet');return}
+            if(m!='off'&&m!='pin'){if(!Native.bioOk()){T('Parmak izi kullanilamiyor');return}pend=m;Native.bio('Parmak iziyle dogrula');return}
+            S('lm',m);T('Kilit: '+LM[m]);drawLM()}
+          function lockInit(){let m=lm();if(m=='off')return;
+            if(m!='pin'&&!Native.bioOk())m=L('pin','')?'pin':'off';if(m=='off')return;
+            stage=0;$('lock').style.display='flex';lockUI(m)}
+          function lockUI(m){const pinStep=m=='pin'||m=='either'||(m=='both'&&stage==1),bioStep=m!='pin'&&!(m=='both'&&stage==1);
+            $('pi').style.display=$('lo').style.display=pinStep?'block':'none';$('lb').style.display=bioStep?'block':'none';
+            $('lt').textContent=pinStep&&m=='both'?'PIN gir':'Panel kilitli';if(bioStep)Native.bio('Panel kilidi')}
+          function onBio(ok){if(pend){const m=pend;pend=null;if(ok){S('lm',m);T('Kilit: '+LM[m]);drawLM()}else T('Dogrulanamadi');return}
+            if($('lock').style.display!='flex'||!ok)return;
+            if(lm()=='both'){stage=1;lockUI('both')}else openLock()}
+          function openLock(){$('lock').style.display='none';$('pi').value=''}
+          function unlock(){if(btoa($('pi').value)===L('pin','')){openLock()}else T('Yanlis PIN')}
+          document.addEventListener('visibilitychange',()=>{if(document.hidden)hid=Date.now();else if(hid&&Date.now()-hid>60000&&!pend)lockInit()});
+          lockInit();
           boot();
           </script></body></html>
           EOF
